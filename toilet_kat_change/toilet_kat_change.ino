@@ -527,6 +527,7 @@ void initTaskWatchdog();
 void disableTaskWatchdog();
 void reinitTaskWatchdog();
 void ensureTaskWatchdogForFlush();
+bool isTaskWatchdogHealthy();
 const char* getTaskWatchdogStatusString();
 void feedTaskWatchdog();
 void wdtCheckpoint();
@@ -562,6 +563,8 @@ void completeCancelRecoveryReady();
 void beginCancelRecoveryHoming();
 bool abortFlushForCancel();
 void abortFlushPreflight(bool showErrorLed);
+bool flushOwnsControlPanelLeds();
+void clearControlPanelLedsIfIdle();
 bool isDeviceIdleForDualButton();
 bool acceptFlushCancel(bool button1Pressed, bool button2Pressed);
 void maintainCancelRecoveryLeds();
@@ -970,11 +973,15 @@ int ERROR_CODE = 0;
 //ERROR_CODE = 7 ==> EEPROM invalid (reflash/parameter recovery required)
 //ERROR_CODE = 8 ==> Heater fail-safe fault (crash recovery, MOSFET short, absolute max on-time)
 //ERROR_CODE = 9 ==> Heater absolute max temperature failsafe (MAX_TEMP_FAILSAFE_C exceeded)
+//ERROR_CODE = 10 ==> Task WDT unhealthy (loop task not subscribed / init failed)
 const int EEPROM_INVALID_ERROR_CODE = 7;
 const int HEATER_FAILSAFE_ERROR_CODE = 8;
 const int HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE = 9;
+const int TASK_WDT_UNHEALTHY_ERROR_CODE = 10;
 const int HEATER_CURRENT_ADC_THRESHOLD = 200;
 const unsigned long TASK_WDT_TIMEOUT_MS = 5000UL;
+const uint8_t TASK_WDT_INIT_MAX_ATTEMPTS = 3;
+const unsigned long TASK_WDT_INIT_RETRY_DELAY_MS = 50UL;
 const uint32_t HEATER_RTC_MAGIC = 0x4854A101UL;
 const uint32_t CRASH_RTC_MAGIC = 0x43525348UL;
 
@@ -1191,9 +1198,7 @@ void trustDoubleBeep() {
 void resetTrustState() {
   g_trustState = TRUST_STATE_UNTRUSTED;
   g_trustStartMs = 0;
-  for (int i = 0; i < totalLeds; i++) {
-    mcp_digitalWrite(getLedPin(i), LOW);
-  }
+  clearControlPanelLedsIfIdle();
 }
 
 void beginTrustWaiting() {
@@ -1205,9 +1210,7 @@ void beginTrustWaiting() {
 void onTrustConfirmedByFlushButton() {
   if (g_trustState != TRUST_STATE_WAITING) return;
   g_trustState = TRUST_STATE_TRUSTED;
-  for (int i = 0; i < totalLeds; i++) {
-    mcp_digitalWrite(getLedPin(i), LOW);
-  }
+  clearControlPanelLedsIfIdle();
   trustDoubleBeep();
 }
 
@@ -1215,9 +1218,7 @@ void updateTrustTimeout() {
   if (g_trustState != TRUST_STATE_WAITING) return;
   if ((millis() - g_trustStartMs) >= TRUST_TIMEOUT_MS) {
     g_trustState = TRUST_STATE_TIMEOUT;
-    for (int i = 0; i < totalLeds; i++) {
-      mcp_digitalWrite(getLedPin(i), LOW);
-    }
+    clearControlPanelLedsIfIdle();
   }
 }
 
@@ -6401,7 +6402,21 @@ void initTaskWatchdog() {
   if (taskWatchdogInitialized) {
     return;
   }
-  initTaskWatchdogCore();
+  for (uint8_t attempt = 1; attempt <= TASK_WDT_INIT_MAX_ATTEMPTS; attempt++) {
+    initTaskWatchdogCore();
+    if (taskWatchdogInitialized) {
+      if (attempt > 1) {
+        Serial.printf("Task watchdog enabled after retry (attempt %u/%u)\n",
+                      (unsigned)attempt, (unsigned)TASK_WDT_INIT_MAX_ATTEMPTS);
+      }
+      return;
+    }
+    Serial.printf("WARNING: TWDT boot init failed (attempt %u/%u)\n",
+                  (unsigned)attempt, (unsigned)TASK_WDT_INIT_MAX_ATTEMPTS);
+    if (attempt < TASK_WDT_INIT_MAX_ATTEMPTS) {
+      delay(TASK_WDT_INIT_RETRY_DELAY_MS);
+    }
+  }
 }
 
 void disableTaskWatchdog() {
@@ -6427,10 +6442,45 @@ void reinitTaskWatchdog() {
 }
 
 void ensureTaskWatchdogForFlush() {
-  if (!taskWatchdogInitialized || taskWatchdogPendingFlushReinit) {
-    reinitTaskWatchdog();
-    taskWatchdogPendingFlushReinit = false;
+  if (taskWatchdogInitialized && !taskWatchdogPendingFlushReinit) {
+    return;
   }
+
+  for (uint8_t attempt = 1; attempt <= TASK_WDT_INIT_MAX_ATTEMPTS; attempt++) {
+    reinitTaskWatchdog();
+    // Only clear pending when re-init left the loop task subscribed.
+    // A failed re-init must not look healthy by clearing the flag alone.
+    if (taskWatchdogInitialized &&
+        taskWatchdogLoopHandle != NULL &&
+        taskWatchdogLoopHandle == xTaskGetCurrentTaskHandle() &&
+        esp_task_wdt_status(taskWatchdogLoopHandle) == ESP_OK) {
+      taskWatchdogPendingFlushReinit = false;
+      if (attempt > 1) {
+        Serial.printf("Task watchdog ready for flush after retry (attempt %u/%u)\n",
+                      (unsigned)attempt, (unsigned)TASK_WDT_INIT_MAX_ATTEMPTS);
+      }
+      return;
+    }
+    Serial.printf("WARNING: TWDT flush re-init failed (attempt %u/%u)\n",
+                  (unsigned)attempt, (unsigned)TASK_WDT_INIT_MAX_ATTEMPTS);
+    if (attempt < TASK_WDT_INIT_MAX_ATTEMPTS) {
+      delay(TASK_WDT_INIT_RETRY_DELAY_MS);
+    }
+  }
+}
+
+bool isTaskWatchdogHealthy() {
+  if (!taskWatchdogInitialized) {
+    return false;
+  }
+  if (taskWatchdogPendingFlushReinit) {
+    return false;
+  }
+  if (taskWatchdogLoopHandle == NULL ||
+      taskWatchdogLoopHandle != xTaskGetCurrentTaskHandle()) {
+    return false;
+  }
+  return esp_task_wdt_status(taskWatchdogLoopHandle) == ESP_OK;
 }
 
 const char* getTaskWatchdogStatusString() {
@@ -7024,9 +7074,7 @@ void loop() {
     factoryRollbackHoldWarned = false;
     if (batteryDisplayMode) {
       batteryDisplayMode = false;
-      for (int i = 0; i < totalLeds; i++) {
-        mcp_digitalWrite(getLedPin(i), LOW);
-      }
+      clearControlPanelLedsIfIdle();
     }
   }
 
@@ -7098,21 +7146,19 @@ void loop() {
           batteryDisplayMode = false;
           bothButtonsPressed = false;
           factoryRollbackHoldWarned = false;
-          for (int i = 0; i < totalLeds; i++) {
-            mcp_digitalWrite(getLedPin(i), LOW);
-          }
+          clearControlPanelLedsIfIdle();
         } else if (holdMs >= DUAL_BUTTON_DEV_HOLD_MS && !factoryRollbackHoldWarned) {
           factoryRollbackHoldWarned = true;
           Serial.println("DEV on dual hold 10s: factory rollback warning (hold 20s total)");
           sendSerialToBLE("DEV_MODE_FACTORY_HOLD_WARN");
           trustDoubleBeep();
-          for (int i = 0; i < totalLeds; i++) {
-            mcp_digitalWrite(getLedPin(i), HIGH);
-          }
-          feedTaskWatchdog();
-          delay(120);
-          for (int i = 0; i < totalLeds; i++) {
-            mcp_digitalWrite(getLedPin(i), LOW);
+          if (!flushOwnsControlPanelLeds()) {
+            for (int i = 0; i < totalLeds; i++) {
+              mcp_digitalWrite(getLedPin(i), HIGH);
+            }
+            feedTaskWatchdog();
+            delay(120);
+            clearControlPanelLedsIfIdle();
           }
         }
       } else if (holdMs >= DUAL_BUTTON_DEV_HOLD_MS) {
@@ -7127,9 +7173,7 @@ void loop() {
         batteryDisplayMode = false;
         bothButtonsPressed = false;
         factoryRollbackHoldWarned = false;
-        for (int i = 0; i < totalLeds; i++) {
-          mcp_digitalWrite(getLedPin(i), LOW);
-        }
+        clearControlPanelLedsIfIdle();
       }
     }
   } else if (!bothButtonsPressedNow) {
@@ -7155,9 +7199,7 @@ void loop() {
        (isCharging ? BATTERY_DISPLAY_CHARGING_MS : BATTERY_DISPLAY_MS))) {
     batteryDisplayMode = false;
     batteryChargeFlashLedIndex = -1;
-    for (int i = 0; i < totalLeds; i++) {
-      mcp_digitalWrite(getLedPin(i), LOW);
-    }
+    clearControlPanelLedsIfIdle();
   }
 
   if (isFlushing) {
@@ -7426,6 +7468,16 @@ void loop() {
     esp_deep_sleep_start();
   }
 
+  // Flush-only: refuse to keep heating/running if loop task is not on the TWDT.
+  // Must run before updateHeaterPID() so PWM is not refreshed while unprotected.
+  if (isFlushing && !isTaskWatchdogHealthy()) {
+    if (ERROR_CODE == 0) {
+      ERROR_CODE = TASK_WDT_UNHEALTHY_ERROR_CODE;
+    }
+    SerialBLE_println("Task WDT unhealthy - stopping flush");
+    stopEverything();
+    LEDErrorCode(ERROR_CODE);
+  }
   if (heaterOn) {
     updateHeaterPID();
     float heaterTemp = (float)heaterInput;
@@ -7544,6 +7596,15 @@ void flushSequence() {
     case 0: {
       char preflightMsg[128];
       ensureTaskWatchdogForFlush();
+      if (!isTaskWatchdogHealthy()) {
+        if (ERROR_CODE == 0) {
+          ERROR_CODE = TASK_WDT_UNHEALTHY_ERROR_CODE;
+        }
+        snprintf(preflightMsg, sizeof(preflightMsg), "gate0_fail task_wdt_unhealthy");
+        logPowerTestEvent("flush_preflight", preflightMsg, true);
+        abortFlushPreflight(true);
+        return;
+      }
       ledLastUpdateMillis = millis();
       maxHeaterWallTimeMs = 0;  // Reset at start of each flush cycle before recomputing once.
       heaterMaxWallAtFlushStart = (ERROR_CODE == 6);
@@ -8234,6 +8295,9 @@ void updateManualFeedRamp() {
 
 // Slow circle LED animation for OTA mode (continuous, slow)
 void slowCircleLeds() {
+  if (flushOwnsControlPanelLeds()) {
+    return;
+  }
   unsigned long currentMillis = millis();
   if (currentMillis - slowCircleLastUpdate >= SLOW_CIRCLE_INTERVAL) {
     slowCircleLastUpdate = currentMillis;
@@ -10381,6 +10445,19 @@ bool mechanismNeedsHomingAfterCancel() {
   return (flushStep >= 2) || (digitalRead(microswitchOpenPin) != LOW);
 }
 
+bool flushOwnsControlPanelLeds() {
+  return isFlushing || flushCancelRecoveryActive;
+}
+
+void clearControlPanelLedsIfIdle() {
+  if (flushOwnsControlPanelLeds()) {
+    return;
+  }
+  for (int i = 0; i < totalLeds; i++) {
+    mcp_digitalWrite(getLedPin(i), LOW);
+  }
+}
+
 bool isDeviceIdleForDualButton() {
   return !isFlushing
       && !motorHomingActive
@@ -10600,17 +10677,14 @@ int clampLedIndex(int index) {
 
 void applyLedDrainToIndex(int targetHighestOnIndex, bool forceImmediate = false) {
   targetHighestOnIndex = clampLedIndex(targetHighestOnIndex);
-  if (targetHighestOnIndex >= ledIndex && !forceImmediate) {
-    return;
+  if (targetHighestOnIndex < ledIndex) {
+    ledIndex = targetHighestOnIndex;
   }
-  if (forceImmediate && targetHighestOnIndex == ledIndex) {
-    return;
-  }
+  (void)forceImmediate;  // Section snaps still drain via ledIndex; ticks always refresh ON+OFF.
 
-  for (int i = ledIndex; i > targetHighestOnIndex; i--) {
-    mcp_digitalWrite(getLedPin(i), LOW);
+  for (int i = 0; i < totalLeds; i++) {
+    mcp_digitalWrite(getLedPin(i), i <= ledIndex ? HIGH : LOW);
   }
-  ledIndex = targetHighestOnIndex;
   ledLastUpdateMillis = millis();
 }
 
@@ -11069,7 +11143,8 @@ void LEDErrorCode(int errorCode) { // Modified to accept errorCode
       (errorCode == 3) ? "heater_overheat" : (errorCode == 4) ? "motor_fault" :
       (errorCode == 5) ? "heater_current_fail" : (errorCode == 6) ? "heater_max_wall" :
       (errorCode == HEATER_FAILSAFE_ERROR_CODE) ? "heater_failsafe" :
-      (errorCode == HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE) ? "heater_max_temp_failsafe" : "unknown";
+      (errorCode == HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE) ? "heater_max_temp_failsafe" :
+      (errorCode == TASK_WDT_UNHEALTHY_ERROR_CODE) ? "task_wdt_unhealthy" : "unknown";
     logError("runtime", errorCode, msg, true);
   }
   displayErrorCodeLeds(errorCode);

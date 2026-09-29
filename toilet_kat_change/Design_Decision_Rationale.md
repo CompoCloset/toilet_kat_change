@@ -88,6 +88,7 @@ Behavior:
 - Boot check: current with GPIO off → MOSFET short suspicion.
 - Runtime: sustained current with GPIO off; configurable continuous PWM on-time cap via `heaterAbsoluteMaxOnS` (default 200 s, BLE/EEPROM parameter) → `ERROR_CODE 8` (`heater_absolute_max_on`). Timer tracks uninterrupted `heaterOutputOn` (duty > 0) and resets when PWM returns to 0 — a continuous-on backstop, not cumulative session time. Distinct from `maxHeaterWallTimeS` (flush step 6 process timeout, `ERROR_CODE 6`).
 - Runtime: absolute thermistor ceiling via `MAX_TEMP_FAILSAFE_C` in `checkHeaterRuntimeSafety()` → `ERROR_CODE 9` (`heater_max_temp_failsafe`).
+- Flush refused or aborted with `ERROR_CODE 10` (`task_wdt_unhealthy`) when the Arduino loop task is not subscribed to the task watchdog (init/re-init failed, pending flush re-init after `ENABLE_TASK_WDT`, or `esp_task_wdt_status` not `ESP_OK`). Boot `initTaskWatchdog()` and flush `ensureTaskWatchdogForFlush()` both retry up to `TASK_WDT_INIT_MAX_ATTEMPTS` (3) with `TASK_WDT_INIT_RETRY_DELAY_MS` (50 ms) between attempts. Case 0 runs ensure then a health check before battery/heater preflight or motors; a failed re-init does not clear `taskWatchdogPendingFlushReinit`. While `isFlushing`, the same health check runs before heater PWM updates and cancels like over-temp (`stopEverything()` + LED) without further re-init retries. Idle, homing, manual feed, and boot heater test are out of scope. 5 s TWDT timeout, `trigger_panic`, and BLE `DISABLE_TASK_WDT` / `ENABLE_TASK_WDT` are unchanged.
 - Case 6 motor cuts and cold-boot motor homing are non-blocking so safety checks and TWDT feeding continue.
 - Flush blocked until `motorHomingActive` is false and `motorHomingDeferred` is false.
 - Light sleep: explicit `heaterOff()` before sleep.
@@ -128,7 +129,7 @@ Behavior:
 - **Loaded VMON preflight** (`measureBatteryUnderLoad`, legacy helper): still available for single-step tests; boot/flush/homing paths now use `assessBatteryUsable` instead of idle % plus light-duty-only load test.
 - **Boot brownout streak**: RTC `BrownoutRtc` counter increments on brownout reset; when streak ≥ `BROWNOUT_STREAK_LIMIT`, boot heater test is skipped.
 - **Ramped boot heater test** (`testHeaterCurrent`): PWM ramps up to assessed `capDuty` instead of always targeting full duty at boot.
-- **Flush case 0 gates**: preflight (usable battery assess, motor faults, heater current test) before entering the flush sequence; failures latch `ERROR_CODE 2` via `latchLowBatteryStop`.
+- **Flush case 0 gates**: preflight (task WDT healthy/subscribed, usable battery assess, motor faults, heater current test) before entering the flush sequence; WDT failure latches `ERROR_CODE 10`; battery failures latch `ERROR_CODE 2` via `latchLowBatteryStop`.
 - **Runtime heater cap** (`updateHeaterPID`): PID output limited by `getHeaterPwmCapForVoltage()` on live VMON each tick.
 - **Runtime low-voltage debounce** (`checkRuntimeSagDebounced`): requires `RUNTIME_SAG_STRIKES` consecutive VMON samples below `minLoadedBatteryV` before latching low battery mid-heat (absolute floor, not delta sag).
 - **M1/heater mutual exclusion**: heater is not armed until case 5 close completes (end of case 5 before case 6); `isM1MotorActive()` blocks heater PID while M1 runs; heat timers pause during M1 motion.
@@ -305,7 +306,7 @@ The firmware persists error codes, crashes, brownouts, and runtime faults to a f
 **What is logged**:
 
 - **Reset/crash/brownout**: `esp_reset_reason()` at boot for unexpected resets (panic, WDT, brownout, SDIO). Normal power-on and software resets are skipped.
-- **Runtime errors**: When `LEDErrorCode()` is called (ERROR_CODE 1–5, 7–9) or when error 6 is logged via `logError()` in flush step 6: motor timeout, low battery, heater overheat, motor fault, heater current fail, heater max wall time (advisory), EEPROM invalid.
+- **Runtime errors**: When `LEDErrorCode()` is called (ERROR_CODE 1–5, 7–10) or when error 6 is logged via `logError()` in flush step 6: motor timeout, low battery, heater overheat, motor fault, heater current fail, heater max wall time (advisory), EEPROM invalid, task WDT unhealthy.
 - **EEPROM invalid (ERROR_CODE 7)**: Full reason from `enterEEPROMInvalidErrorState()`. Steady LED 7 indicator; **blocks flush** at preflight until recovered via verified BLE param write.
 - **OTA failures**: When `setOTAState(OTA_ERROR)` is invoked.
 - **OTA boot diagnostics**: `ota_boot`, `ota_boot_fail`, `ota_rollback`, `ota_boot_ok`, `ota_spiffs_capture` while verifying or running a recently OTA-installed partition. NVS snapshot available via `GET_OTA_DIAG`.
@@ -419,6 +420,12 @@ The BLE trust handshake requires a physical button press near the device before 
 - One stable confirmation signal across silk 2.0 and 2.2 without duplicating pinout logic in the trust path.
 - Matches hardware wake wiring on 2.2 (both buttons already pull SW1 low).
 - Avoids trust failures when MCP expander reads differ from the GPIO2 wake line.
+
+## Flush owns control-panel LEDs until complete, cancel, or abort
+
+Flush progress is the only LED owner while `isFlushing` or `flushCancelRecoveryActive`. Idle writers (BLE trust connect/disconnect/`TRUST_CANCEL`/timeout/confirm, OTA/trust `slowCircleLeds()`, battery-display exit) must not blank the panel during that window. Trust **flags** still reset on connect/disconnect; only the MCP LED writes are skipped.
+
+Each 90 ms progress tick rewrites the remaining bar (HIGH for UI indexes `0..ledIndex`, LOW above). Drain stays monotonic. That recovers from I2C glitches and from any stray wipe (for example a hardware-disconnect alert that flashes then leaves LEDs off without cancelling). Blocking error flashes (`LEDErrorCode`) still take over after `stopEverything()` clears flush ownership.
 
 ## Hardware DEV mode toggle via dual-button hold
 
