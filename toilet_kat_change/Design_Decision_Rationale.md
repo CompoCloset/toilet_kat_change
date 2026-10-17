@@ -73,6 +73,20 @@ Rationale:
 - Deliberately separate from `ERROR_CODE 3` so field logs distinguish "above process target margin" vs "above hardware absolute limit".
 - Default 200 °C provides headroom above normal operating temps (~140 °C) while still bounding worst-case heating.
 
+## Mid-flush main thermistor disconnect (`ERROR_CODE 11`)
+
+Behavior:
+
+- While `isFlushing`, every `loop()` iteration in `checkHeaterRuntimeSafety()` (before the `MAX_TEMP_FAILSAFE_C` check) calls `isHardwareLikelyDisconnectedForUserAction()` twice back-to-back in that same function — same open-circuit helper as button/homing gates (`readMainThermistorResistanceOhms() > HARDWARE_DISCONNECT_RESISTANCE_OHMS`), not a temperature threshold.
+- If both reads in that call are disconnected, the flush aborts immediately on that `loop()` pass (`ERROR_CODE = 11`, `thermistor_disconnected`, `stopEverything()`, LED index 11 / buzzer via `LEDErrorCode()`) before `updateHeaterPID()` or `flushSequence()` run, so cooling-step false cold cannot start the open motor on the same pass. Blocking like other flush errors except advisory code 6.
+- Applies for the whole flush (heat and cool-down), so a held-open ADC cannot keep the heater on or let flush step 7 treat a false cold reading as safe to open the jaw.
+- Cancel-recovery (`abortFlushForCancel()` / case 14) is not used: that path trusts thermistor temperature and would open the mechanism on the same false cold reading.
+
+Rationale:
+
+- Field failure: pin at ADC full scale reads as ~−214 °C, so relative overheat and absolute max-temp guards never trip; the heater can run until wall time and the cool-open step can release the jaw while the bag is still hot.
+- `stopEverything()` leaves the mechanism where it is instead of driving open on bogus temperature.
+
 ## Heater fail-safe firmware (crash and runaway monitoring)
 
 ![Heater fail-safe boot and main-loop flow](docs/heater_failsafe_flow.png)
@@ -88,6 +102,7 @@ Behavior:
 - Boot check: current with GPIO off → MOSFET short suspicion.
 - Runtime: sustained current with GPIO off; configurable continuous PWM on-time cap via `heaterAbsoluteMaxOnS` (default 200 s, BLE/EEPROM parameter) → `ERROR_CODE 8` (`heater_absolute_max_on`). Timer tracks uninterrupted `heaterOutputOn` (duty > 0) and resets when PWM returns to 0 — a continuous-on backstop, not cumulative session time. Distinct from `maxHeaterWallTimeS` (flush step 6 process timeout, `ERROR_CODE 6`).
 - Runtime: absolute thermistor ceiling via `MAX_TEMP_FAILSAFE_C` in `checkHeaterRuntimeSafety()` → `ERROR_CODE 9` (`heater_max_temp_failsafe`).
+- Runtime: main thermistor open during flush (two back-to-back disconnect reads in one `checkHeaterRuntimeSafety()` call, abort before PWM/flush motion that pass) → `ERROR_CODE 11` (`thermistor_disconnected`); `stopEverything()` without cancel-recovery.
 - Flush refused or aborted with `ERROR_CODE 10` (`task_wdt_unhealthy`) when the Arduino loop task is not subscribed to the task watchdog (init/re-init failed, pending flush re-init after `ENABLE_TASK_WDT`, or `esp_task_wdt_status` not `ESP_OK`). Boot `initTaskWatchdog()` and flush `ensureTaskWatchdogForFlush()` both retry up to `TASK_WDT_INIT_MAX_ATTEMPTS` (3) with `TASK_WDT_INIT_RETRY_DELAY_MS` (50 ms) between attempts. Case 0 runs ensure then a health check before battery/heater preflight or motors; a failed re-init does not clear `taskWatchdogPendingFlushReinit`. While `isFlushing`, the same health check runs before heater PWM updates and cancels like over-temp (`stopEverything()` + LED) without further re-init retries. Idle, homing, manual feed, and boot heater test are out of scope. 5 s TWDT timeout, `trigger_panic`, and BLE `DISABLE_TASK_WDT` / `ENABLE_TASK_WDT` are unchanged.
 - Case 6 motor cuts and cold-boot motor homing are non-blocking so safety checks and TWDT feeding continue.
 - Flush blocked until `motorHomingActive` is false and `motorHomingDeferred` is false.
@@ -233,7 +248,9 @@ A trap mid-travel used to leave M1 stopped at the jam (close timeout or open tim
 
 **Open (flush cases 8/10 while M1 is still running, homing open-full):** opening should not stall. If current stays above `0.5 A` while the open switch is still HIGH, reverse close (`setM1Speed(400)`) for 2 s **immediately**, then abort. Ignore the first `300 ms` after open starts (inrush) and require `150 ms` of high current before firing. If current never spikes, the existing `maxOpeningTime` timeout still stops in place.
 
-**Reverse completion:** stop M1, `ERROR_CODE = 1`, `stopEverything()`, LED error. No auto-retry. If the opposite endstop hits during reverse, stop M1 early instead of driving into the stop. Cancel / `stopEverything()` clears jam-reverse state so M1 does not keep running.
+**Reverse completion:** stop M1, `ERROR_CODE = 1`, `stopEverything()`, LED error. No auto-retry. If the opposite endstop hits during reverse, stop M1 early instead of driving into the stop.
+
+**Control panel must not cancel jam reverse.** The reverse is the motion that backs the mechanism off a jam so a trapped limb or object can be pulled free. Someone who is trapped is likely to press the control panel. If that press stops M1, the backup that would release them is cut short. While `m1JamReverseActive` is set, control-panel input (flush, feed, dual-button, wake line) does not call `stopEverything()`, `stopFlushActiveOperations()`, or `clearFlushStateForCancel()` in a way that clears the reverse or zeros M1. The reverse still ends on its own: opposite endstop, or `M1_JAM_REVERSE_MS` (2 s), then ERROR_CODE 1. Fault paths (over-temp, motor fault, low-battery latch) may still call `stopEverything()` and clear the reverse; those are not a user trying to free a limb.
 
 ## Flush cancel recovery
 
@@ -271,7 +288,7 @@ During an active flush, the user can cancel via control panel input (button 1, b
 
 - New flush start remains blocked while `isFlushing` (including case 14) or `motorHomingActive`.
 - Dual-button press during flush uses `acceptFlushCancel()` (same recovery as single-button cancel), not `stopEverything()`.
-- Dual-button press while busy but not flushing (manual feed, homing, etc.) uses `stopEverything()` as a hard stop.
+- Dual-button press while busy but not flushing (manual feed, homing, etc.) uses `stopEverything()` as a hard stop, except while `motorHomingActive` or `m1JamReverseActive`. Homing is left running so a battery read cannot mark the mechanism as located. Jam reverse is left running so a control-panel press cannot stop the backup that frees a trapped limb (see M1 jam reverse).
 - Fault paths and OTA enable still use `stopEverything()`, which clears `cancelRecoveryHomingPending`.
 - Normal flush post-open tail (cases 8–13) is never entered on cancel recovery.
 

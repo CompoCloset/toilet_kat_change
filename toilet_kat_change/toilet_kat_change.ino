@@ -14,6 +14,7 @@
 #include <esp_sleep.h>    // Include for deep sleep and wake
 #include <driver/rtc_io.h> // RTC GPIO for wake pin pull-up in deep sleep
 #include <driver/gpio.h>   // GPIO hold during deep sleep (fan PWM pin)
+#include <esp_rtc_time.h>
 #include <esp_task_wdt.h>
 #include <mbedtls/md5.h> // Include for MD5 validation
 #include <mbedtls/base64.h>
@@ -548,6 +549,14 @@ void updateHeaterPID();
 void heaterOff();
 void prepareFanPinsForDeepSleep();
 void releaseFanPinsFromDeepSleepHold();
+void loadFanDutySetting();
+bool setFanDutyFromCommand(uint8_t percent);
+String buildFanDutyStatusMessage();
+void serviceFanDutySchedule();
+void beginFanDutyAfterFlush();
+void noteFlushEndedForFanDuty(bool completed);
+bool fanDutyTimerWakeContinueSleep();
+void enableDeepSleepWakeSources();
 void initHeaterPidController();
 void initCorePlatformServices();
 void LEDErrorCode(int errorCode);
@@ -821,6 +830,18 @@ static unsigned long battFullPostBusyMs = 0;
 // Runtime DEV mode (persisted in NVS): when enabled, inactivity deep sleep is disabled.
 const char* DEV_MODE_NAMESPACE = "system";
 const char* DEV_MODE_KEY = "dev_mode";
+const char* FAN_DUTY_NVS_KEY = "fan_duty";
+constexpr uint8_t FAN_DUTY_PHASE_IDLE = 0;
+constexpr uint8_t FAN_DUTY_PHASE_ON = 1;
+constexpr uint8_t FAN_DUTY_PHASE_OFF = 2;
+constexpr uint8_t FAN_DUTY_PHASE_POST_FLUSH = 3;
+constexpr uint64_t FAN_DUTY_POST_FLUSH_US = 5ULL * 60ULL * 1000000ULL;
+RTC_DATA_ATTR uint8_t rtcFanDutyPercent = 0;
+RTC_DATA_ATTR uint8_t rtcFanDutyPhase = FAN_DUTY_PHASE_IDLE;
+RTC_DATA_ATTR uint8_t rtcFanOutputOn = 0;
+RTC_DATA_ATTR uint8_t rtcFanScheduleValid = 0;
+RTC_DATA_ATTR uint64_t rtcFanDeadlineUs = 0;
+bool fanDutyApplyAfterFlush = false;
 const char* HOMING_DEFERRED_NVS_KEY = "homing_deferred";
 const char* HOMING_DEFER_REASON_NVS_KEY = "homing_defer_reason";
 const size_t HOMING_DEFER_REASON_MAX = 32;
@@ -974,10 +995,12 @@ int ERROR_CODE = 0;
 //ERROR_CODE = 8 ==> Heater fail-safe fault (crash recovery, MOSFET short, absolute max on-time)
 //ERROR_CODE = 9 ==> Heater absolute max temperature failsafe (MAX_TEMP_FAILSAFE_C exceeded)
 //ERROR_CODE = 10 ==> Task WDT unhealthy (loop task not subscribed / init failed)
+//ERROR_CODE = 11 ==> Main thermistor open / poor connection during flush
 const int EEPROM_INVALID_ERROR_CODE = 7;
 const int HEATER_FAILSAFE_ERROR_CODE = 8;
 const int HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE = 9;
 const int TASK_WDT_UNHEALTHY_ERROR_CODE = 10;
+const int THERMISTOR_DISCONNECTED_ERROR_CODE = 11;
 const int HEATER_CURRENT_ADC_THRESHOLD = 200;
 const unsigned long TASK_WDT_TIMEOUT_MS = 5000UL;
 const uint8_t TASK_WDT_INIT_MAX_ATTEMPTS = 3;
@@ -1470,6 +1493,39 @@ class command_characteristic_callbacks: public BLECharacteristicCallbacks {
       writeResponseToChannel(statusMessage);
       Serial.printf("Processed GET_DEV_MODE, returned %s\n", statusMessage.c_str());
       sendSerialToBLE("Processed GET_DEV_MODE");
+      return;
+    }
+    if (cmd == "GET_FAN_DUTY") {
+      String statusMessage = buildFanDutyStatusMessage();
+      writeResponseToChannel(statusMessage);
+      Serial.printf("Processed GET_FAN_DUTY, returned %s\n", statusMessage.c_str());
+      sendSerialToBLE("Processed GET_FAN_DUTY");
+      return;
+    }
+    if (cmd.startsWith("SET_FAN_DUTY:")) {
+      if (!isTrustedConnection()) {
+        writeResponseToChannel("AUTH_REQUIRED");
+        Serial.println("SET_FAN_DUTY blocked - trust handshake required");
+        return;
+      }
+      String valueString = cmd.substring(String("SET_FAN_DUTY:").length());
+      valueString.trim();
+      if (valueString != "0" && valueString != "25" && valueString != "50" &&
+          valueString != "75" && valueString != "100") {
+        writeResponseToChannel("SET_FAN_DUTY_ERR:INVALID_VALUE");
+        Serial.printf("Rejected SET_FAN_DUTY with invalid value: '%s'\n", valueString.c_str());
+        sendSerialToBLE("SET_FAN_DUTY rejected: invalid value");
+        return;
+      }
+      uint8_t requestedDuty = (uint8_t)valueString.toInt();
+      if (!setFanDutyFromCommand(requestedDuty)) {
+        writeResponseToChannel("SET_FAN_DUTY_ERR:PERSIST_FAIL");
+        sendSerialToBLE("SET_FAN_DUTY failed: persist error");
+        return;
+      }
+      String ack = String("SET_FAN_DUTY_ACK:") + String(requestedDuty);
+      writeResponseToChannel(ack);
+      sendSerialToBLE("SET_FAN_DUTY applied");
       return;
     }
     if (cmd == "GET_FLUSH_COUNT") {
@@ -6559,6 +6615,16 @@ void checkHeaterRuntimeSafety() {
     return;
   }
 
+  if (isFlushing &&
+      isHardwareLikelyDisconnectedForUserAction() &&
+      isHardwareLikelyDisconnectedForUserAction()) {
+    Serial.println("Heater runtime safety: main thermistor disconnected during flush");
+    ERROR_CODE = THERMISTOR_DISCONNECTED_ERROR_CODE;
+    stopEverything();
+    LEDErrorCode(THERMISTOR_DISCONNECTED_ERROR_CODE);
+    return;
+  }
+
   unsigned long now = millis();
 
   float heaterTemp = readTemperature();
@@ -6671,6 +6737,7 @@ void initCorePlatformServices() {
   logBootTiming("devmode_load_start");
   loadDevModeSetting();
   logBootTiming("devmode_load_done");
+  loadFanDutySetting();
   loadMotorHomingDeferredFromNvs();
   logBootTiming("hw_matrix_start");
   initializeHardwareMatrix();
@@ -6801,12 +6868,22 @@ void setup() {
 
   esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   bool wokeFromDeepSleep = (wakeCause == ESP_SLEEP_WAKEUP_EXT0);
+  if (wakeCause == ESP_SLEEP_WAKEUP_TIMER && fanDutyTimerWakeContinueSleep()) {
+    return;
+  }
+  if (wakeCause == ESP_SLEEP_WAKEUP_TIMER) {
+    wokeFromDeepSleep = true;
+  }
 
   releaseFanPinsFromDeepSleepHold();
   pinMode(sealerFanPwr, OUTPUT);
   pinMode(sealerFanReverse, OUTPUT);
   ledcAttach(sealerFanPWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-  setFanSpeed(0);
+  if (rtcFanScheduleValid) {
+    setFanSpeed(rtcFanOutputOn ? 400 : 0);
+  } else {
+    setFanSpeed(0);
+  }
   initHeaterGpioSafe();
   initHeaterPwm();
   logBootCheckpoint("gpio_safe");
@@ -7403,20 +7480,12 @@ void loop() {
       // Fan timer is active - keep M3 running
       //setFanSpeed(255);  // Keep fan running
     } else if (!button2Pressed && fanRunning && (millis() - fanStartTime >= fanDuration * 1000)) {
-      // Fan timer completed - stop fan
+      // Manual-feed fan timer finished. Duty schedule decides the next level.
       SerialBLE_println("b2 not pressed, fan running, time out ");
-      Serial.println("Fan timer completed - stopping fan");
-      setFanSpeed(0);  // Stop M3 motor/fan
-      fanRunning = false;  // Clear fan running flag
-    } else {
-      // Default: button not pressed, no active fan - ensure M3 (fan) is stopped
-      // Only if not flushing (flush sequence controls M3 during flush)
-      if (!isFlushing) {
-        setFanSpeed(0);
-        //SerialBLE_println("stopping fan - no conditions met and not flushing");
-        fanRunning = false;
-      }
-      
+      Serial.println("Fan timer completed - returning fan to duty schedule");
+      fanRunning = false;
+    } else if (!isFlushing) {
+      fanRunning = false;
     }
   }  // Close if (!batteryDisplayMode)
   
@@ -7435,9 +7504,11 @@ void loop() {
   button1WasPressed = button1Pressed;
   button2WasPressed = button2Pressed;
 
-  // Inactivity deep sleep: 5 minutes with no activity, wake on GPIO2 (controlPanelWake)
+  serviceFanDutySchedule();
+
+  // Inactivity deep sleep: 5 minutes with no activity, wake on GPIO2 (controlPanelWake).
   // Only enter when wake button is released (HIGH) so pin does not trigger immediate wake.
-  // Fan pins are held LOW for legacy boards where fan power may be bypassed.
+  // Fan pins are held at the scheduled level. A timer wake is armed only when a transition is pending.
   if (!devModeEnabled && !otaEnabled && !batteryDisplayMode && !isFlushing && !motorHomingActive &&
       !mechanismMotorRunning && !fanRunning && !isCharging &&
       (millis() - lastActivityMillis >= INACTIVITY_SLEEP_MS) &&
@@ -7445,7 +7516,6 @@ void loop() {
     heaterOff();
     unsigned long settleStart = millis();
     while (millis() - settleStart < 5000) {
-      setFanSpeed(0);
       motors.setM1Speed(0);
       motors.setM2Speed(0);
       applyHeaterPwmDuty(0);
@@ -7453,11 +7523,7 @@ void loop() {
       delay(10);
     }
 
-    // Deep sleep uses RTC EXT0 wake. GPIO2 is held HIGH by pull-up and wakes when pulled LOW.
-    rtc_gpio_init((gpio_num_t)controlPanelWake);
-    rtc_gpio_pullup_en((gpio_num_t)controlPanelWake);
-    rtc_gpio_pulldown_dis((gpio_num_t)controlPanelWake);
-    esp_sleep_enable_ext0_wakeup((gpio_num_t)controlPanelWake, 0);
+    serviceFanDutySchedule();
     prepareFanPinsForDeepSleep();
     if (getErrorLogFileSize() > LOG_SLEEP_TRIM_TRIGGER) {
       trimErrorLogToSize(LOG_TRIM_TARGET);
@@ -7465,6 +7531,7 @@ void loop() {
     shutdownBleForPowerDown("inactivity_deep_sleep");
     esp_task_wdt_reset();
     clearChargeHistory();
+    enableDeepSleepWakeSources();
     esp_deep_sleep_start();
   }
 
@@ -8153,6 +8220,7 @@ void flushSequence() {
         setFlushStep(0, false);
         flushCancelArmed = false;
         cutBag = false;  // Reset cutBag for next cycle
+        noteFlushEndedForFanDuty(true);
         lastActivityMillis = millis();  // Restart inactivity/sleep timer at end of flush
         SerialBLE_println("Moving to Case0 from 13 - end of sequence:");
         Serial.println(millis());
@@ -10510,6 +10578,7 @@ void stopFlushActiveOperations() {
 }
 
 void clearFlushStateForCancel() {
+  bool wasFlushing = isFlushing;
   motors.setM2Speed(0);
   motors.setM1Speed(0);
   setFanSpeed(0);
@@ -10548,6 +10617,9 @@ void clearFlushStateForCancel() {
   heaterMaxWallAtFlushStart = false;
   heaterMaxWallThisFlush = false;
   clearM1JamReverseState();
+  if (wasFlushing) {
+    noteFlushEndedForFanDuty(false);
+  }
 }
 
 void abortFlushPreflight(bool showErrorLed) {
@@ -10660,6 +10732,9 @@ void stopEverything() {
 
   for (int i = 0; i < totalLeds; i++) {
     mcp_digitalWrite(getLedPin(i), LOW);
+  }
+  if (wasFlushing) {
+    noteFlushEndedForFanDuty(false);
   }
 }
 
@@ -11144,7 +11219,8 @@ void LEDErrorCode(int errorCode) { // Modified to accept errorCode
       (errorCode == 5) ? "heater_current_fail" : (errorCode == 6) ? "heater_max_wall" :
       (errorCode == HEATER_FAILSAFE_ERROR_CODE) ? "heater_failsafe" :
       (errorCode == HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE) ? "heater_max_temp_failsafe" :
-      (errorCode == TASK_WDT_UNHEALTHY_ERROR_CODE) ? "task_wdt_unhealthy" : "unknown";
+      (errorCode == TASK_WDT_UNHEALTHY_ERROR_CODE) ? "task_wdt_unhealthy" :
+      (errorCode == THERMISTOR_DISCONNECTED_ERROR_CODE) ? "thermistor_disconnected" : "unknown";
     logError("runtime", errorCode, msg, true);
   }
   displayErrorCodeLeds(errorCode);
@@ -11214,23 +11290,292 @@ void heaterOff() {
 }
 
 // Motor 3 control functions (PWM fan)
-void prepareFanPinsForDeepSleep() {
-  setFanSpeed(0);
+bool isValidFanDutyPercent(uint8_t percent) {
+  return percent == 0 || percent == 25 || percent == 50 || percent == 75 || percent == 100;
+}
 
+uint64_t fanDutyNowUs() {
+  return esp_rtc_get_time_us();
+}
+
+void fanDutyOnOffMinutes(uint8_t percent, uint32_t* onMin, uint32_t* offMin) {
+  if (percent == 25) {
+    *onMin = 15;
+    *offMin = 45;
+  } else if (percent == 50) {
+    *onMin = 30;
+    *offMin = 30;
+  } else if (percent == 75) {
+    *onMin = 45;
+    *offMin = 15;
+  } else {
+    *onMin = 0;
+    *offMin = 0;
+  }
+}
+
+uint64_t fanDutyMinutesToUs(uint32_t minutes) {
+  return (uint64_t)minutes * 60ULL * 1000000ULL;
+}
+
+bool fanDutyScheduleOwnsOutput() {
+  return !isFlushing && !otaEnabled && !fanRunning && !button2FeedStarted;
+}
+
+void applyScheduledFanOutput() {
+  if (!fanDutyScheduleOwnsOutput()) {
+    return;
+  }
+  int desiredState = rtcFanOutputOn ? 1 : 0;
+  if (lastFanState != desiredState) {
+    setFanSpeed(rtcFanOutputOn ? 400 : 0);
+  }
+}
+
+void advanceFanDutyPhase() {
+  if (rtcFanDutyPhase == FAN_DUTY_PHASE_POST_FLUSH || rtcFanDutyPercent == 0) {
+    rtcFanDutyPhase = FAN_DUTY_PHASE_IDLE;
+    rtcFanOutputOn = 0;
+    rtcFanDeadlineUs = 0;
+    return;
+  }
+  if (rtcFanDutyPercent == 100) {
+    rtcFanDutyPhase = FAN_DUTY_PHASE_IDLE;
+    rtcFanOutputOn = 1;
+    rtcFanDeadlineUs = 0;
+    return;
+  }
+
+  uint32_t onMin = 0;
+  uint32_t offMin = 0;
+  fanDutyOnOffMinutes(rtcFanDutyPercent, &onMin, &offMin);
+  if (rtcFanDutyPhase == FAN_DUTY_PHASE_ON) {
+    rtcFanDutyPhase = FAN_DUTY_PHASE_OFF;
+    rtcFanOutputOn = 0;
+    rtcFanDeadlineUs = fanDutyNowUs() + fanDutyMinutesToUs(offMin);
+  } else {
+    rtcFanDutyPhase = FAN_DUTY_PHASE_ON;
+    rtcFanOutputOn = 1;
+    rtcFanDeadlineUs = fanDutyNowUs() + fanDutyMinutesToUs(onMin);
+  }
+}
+
+void catchUpFanDutySchedule() {
+  if (!rtcFanScheduleValid) {
+    return;
+  }
+  for (int guard = 0; guard < 8; guard++) {
+    if (rtcFanDeadlineUs == 0 || fanDutyNowUs() < rtcFanDeadlineUs) {
+      return;
+    }
+    advanceFanDutyPhase();
+  }
+}
+
+void stopFanDutyImmediately() {
+  rtcFanDutyPhase = FAN_DUTY_PHASE_IDLE;
+  rtcFanOutputOn = 0;
+  rtcFanDeadlineUs = 0;
+  rtcFanScheduleValid = 1;
+  applyScheduledFanOutput();
+  Serial.println("Fan duty stopped");
+}
+
+void startFanDutyOnPhase() {
+  rtcFanScheduleValid = 1;
+  if (rtcFanDutyPercent == 0) {
+    stopFanDutyImmediately();
+    return;
+  }
+  if (rtcFanDutyPercent == 100) {
+    rtcFanDutyPhase = FAN_DUTY_PHASE_IDLE;
+    rtcFanOutputOn = 1;
+    rtcFanDeadlineUs = 0;
+  } else {
+    uint32_t onMin = 0;
+    uint32_t offMin = 0;
+    fanDutyOnOffMinutes(rtcFanDutyPercent, &onMin, &offMin);
+    rtcFanDutyPhase = FAN_DUTY_PHASE_ON;
+    rtcFanOutputOn = 1;
+    rtcFanDeadlineUs = fanDutyNowUs() + fanDutyMinutesToUs(onMin);
+  }
+  applyScheduledFanOutput();
+  Serial.printf("Fan duty on phase started: %u%%\n", (unsigned)rtcFanDutyPercent);
+}
+
+void startPostFlushFanTail() {
+  rtcFanScheduleValid = 1;
+  rtcFanDutyPhase = FAN_DUTY_PHASE_POST_FLUSH;
+  rtcFanOutputOn = 1;
+  rtcFanDeadlineUs = fanDutyNowUs() + FAN_DUTY_POST_FLUSH_US;
+  applyScheduledFanOutput();
+  Serial.println("Fan post-flush tail started (5 min)");
+}
+
+void beginFanDutyAfterFlush() {
+  fanDutyApplyAfterFlush = false;
+  if (rtcFanDutyPercent == 0) {
+    startPostFlushFanTail();
+  } else {
+    startFanDutyOnPhase();
+  }
+}
+
+void noteFlushEndedForFanDuty(bool completed) {
+  if (otaEnabled) {
+    fanDutyApplyAfterFlush = false;
+    return;
+  }
+  if (completed || fanDutyApplyAfterFlush) {
+    beginFanDutyAfterFlush();
+  }
+}
+
+void serviceFanDutySchedule() {
+  if (!rtcFanScheduleValid || isFlushing || otaEnabled) {
+    return;
+  }
+  catchUpFanDutySchedule();
+  applyScheduledFanOutput();
+}
+
+bool saveFanDutySetting(uint8_t percent) {
+  nvs_handle_t nvsHandle;
+  esp_err_t err = nvs_open(DEV_MODE_NAMESPACE, NVS_READWRITE, &nvsHandle);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to open NVS for fan duty write: %s\n", esp_err_to_name(err));
+    return false;
+  }
+  err = nvs_set_u8(nvsHandle, FAN_DUTY_NVS_KEY, percent);
+  if (err == ESP_OK) {
+    err = nvs_commit(nvsHandle);
+  }
+  nvs_close(nvsHandle);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to persist fan duty: %s\n", esp_err_to_name(err));
+    return false;
+  }
+  return true;
+}
+
+void loadFanDutySetting() {
+  if (rtcFanScheduleValid) {
+    Serial.printf("Fan duty retained across deep sleep: %u%% phase=%u on=%u\n",
+                  (unsigned)rtcFanDutyPercent, (unsigned)rtcFanDutyPhase, (unsigned)rtcFanOutputOn);
+    return;
+  }
+
+  uint8_t stored = 0;
+  nvs_handle_t nvsHandle;
+  esp_err_t err = nvs_open(DEV_MODE_NAMESPACE, NVS_READONLY, &nvsHandle);
+  if (err == ESP_OK) {
+    err = nvs_get_u8(nvsHandle, FAN_DUTY_NVS_KEY, &stored);
+    nvs_close(nvsHandle);
+    if (err != ESP_OK || !isValidFanDutyPercent(stored)) {
+      stored = 0;
+    }
+  } else {
+    stored = 0;
+  }
+
+  rtcFanDutyPercent = stored;
+  rtcFanScheduleValid = 1;
+  rtcFanDeadlineUs = 0;
+  rtcFanDutyPhase = FAN_DUTY_PHASE_IDLE;
+  rtcFanOutputOn = (stored == 100) ? 1 : 0;
+  Serial.printf("Loaded fan duty from NVS: %u%%\n", (unsigned)rtcFanDutyPercent);
+  applyScheduledFanOutput();
+}
+
+bool setFanDutyFromCommand(uint8_t percent) {
+  if (!isValidFanDutyPercent(percent) || !saveFanDutySetting(percent)) {
+    return false;
+  }
+  rtcFanDutyPercent = percent;
+  rtcFanScheduleValid = 1;
+  if (isFlushing) {
+    fanDutyApplyAfterFlush = true;
+    Serial.printf("Fan duty %u%% stored until flush ends\n", (unsigned)percent);
+    return true;
+  }
+  if (percent == 0) {
+    stopFanDutyImmediately();
+  } else {
+    startFanDutyOnPhase();
+  }
+  return true;
+}
+
+String buildFanDutyStatusMessage() {
+  return String("FAN_DUTY:") + String(rtcFanDutyPercent);
+}
+
+void holdFanPinsForDeepSleep(bool fanOn, bool detachLedc) {
+  if (detachLedc) {
+    ledcDetach(sealerFanPWM);
+  }
   pinMode(sealerFanPwr, OUTPUT);
   pinMode(sealerFanReverse, OUTPUT);
   pinMode(sealerFanPWM, OUTPUT);
-  digitalWrite(sealerFanPwr, LOW);
+  int level = fanOn ? 1 : 0;
+  digitalWrite(sealerFanPwr, level);
   digitalWrite(sealerFanReverse, LOW);
-  digitalWrite(sealerFanPWM, LOW);
-  gpio_set_level((gpio_num_t)sealerFanPwr, 0);
+  digitalWrite(sealerFanPWM, level);
+  gpio_set_level((gpio_num_t)sealerFanPwr, level);
   gpio_set_level((gpio_num_t)sealerFanReverse, 0);
-  gpio_set_level((gpio_num_t)sealerFanPWM, 0);
-
+  gpio_set_level((gpio_num_t)sealerFanPWM, level);
   gpio_hold_en((gpio_num_t)sealerFanPwr);
   gpio_hold_en((gpio_num_t)sealerFanReverse);
   gpio_hold_en((gpio_num_t)sealerFanPWM);
   gpio_deep_sleep_hold_en();
+}
+
+void prepareFanPinsForDeepSleep() {
+  holdFanPinsForDeepSleep(rtcFanOutputOn != 0, true);
+}
+
+void enableDeepSleepWakeSources() {
+  rtc_gpio_init((gpio_num_t)controlPanelWake);
+  rtc_gpio_pullup_en((gpio_num_t)controlPanelWake);
+  rtc_gpio_pulldown_dis((gpio_num_t)controlPanelWake);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)controlPanelWake, 0);
+
+  if (rtcFanDeadlineUs == 0) {
+    return;
+  }
+  uint64_t now = fanDutyNowUs();
+  if (rtcFanDeadlineUs <= now) {
+    return;
+  }
+  uint64_t waitUs = rtcFanDeadlineUs - now;
+  esp_err_t err = esp_sleep_enable_timer_wakeup(waitUs);
+  if (err == ESP_OK) {
+    Serial.printf("Deep sleep fan timer armed for %llu s\n",
+                  (unsigned long long)(waitUs / 1000000ULL));
+  } else {
+    Serial.printf("esp_sleep_enable_timer_wakeup failed: %s\n", esp_err_to_name(err));
+  }
+}
+
+bool fanDutyTimerWakeContinueSleep() {
+  if (!rtcFanScheduleValid) {
+    return false;
+  }
+  if (rtcFanDeadlineUs != 0) {
+    advanceFanDutyPhase();
+  }
+  if (rtc_gpio_get_level((gpio_num_t)controlPanelWake) == 0) {
+    Serial.println("Fan duty timer wake with button pressed - staying awake");
+    return false;
+  }
+  Serial.printf("Fan duty timer wake: output=%u phase=%u\n",
+                (unsigned)rtcFanOutputOn, (unsigned)rtcFanDutyPhase);
+  releaseFanPinsFromDeepSleepHold();
+  holdFanPinsForDeepSleep(rtcFanOutputOn != 0, false);
+  enableDeepSleepWakeSources();
+  Serial.flush();
+  esp_deep_sleep_start();
+  return true;
 }
 
 void releaseFanPinsFromDeepSleepHold() {
