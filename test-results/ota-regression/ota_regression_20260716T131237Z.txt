@@ -1,0 +1,32 @@
+OTA Partition Regression Report
+Run ID: 20260716T131237Z
+Started: 2026-07-16T13:12:37.584861+00:00
+Ended: 2026-07-16T13:14:35.280837+00:00
+Result: FAIL
+Dry run: False
+Fast mode: False
+Auto-build: False
+Port: COM7
+BLE address: 3C:DC:75:FC:62:5D
+
+Partition sequence: 
+Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+
+Version evolution:
+Step                 Partition  Expected SW              Observed SW              Pass
+------------------------------------------------------------------------------------------
+flash_factory        factory    unknown                  3.0.0                    FAIL
+
+Failures:
+  - flash_factory: Expected Build 2026-03-13, observed 'Mar 13 202'
+  - OTA update failed for ota1; ble_state=failed detail='firmware transfer failed'
+  - Partition sequence mismatch: expected ['factory', 'ota_0', 'ota_1', 'ota_0', 'ota_1', 'ota_0', 'factory', 'ota_0'], observed []
+
+[FAIL] flash_factory (17.63s)
+  transport: serial
+  expected partition: factory
+  observed partition: factory
+  expected SW: unknown
+  observed SW: 3.0.0
+  version: HW:Uninitialized|SW:3.0.0|Build:Mar 13 202
+  error: Expected Build 2026-03-13, observed 'Mar 13 202'

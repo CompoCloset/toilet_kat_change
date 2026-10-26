@@ -1,0 +1,388 @@
+{
+  "run_id": "20260824T155631Z",
+  "started_at": "2026-08-24T15:56:31.211023+00:00",
+  "ended_at": "2026-08-24T17:32:11.241490+00:00",
+  "passed": false,
+  "dry_run": false,
+  "fast_mode": false,
+  "auto_build": false,
+  "port": "COM11",
+  "address": "A4:CB:8F:DD:1A:A9",
+  "partition_sequence": [
+    "ota_1",
+    "ota_0",
+    "ota_1",
+    "ota_0",
+    "ota_0"
+  ],
+  "steps": [
+    {
+      "name": "flash_factory",
+      "passed": false,
+      "expected_partition": "factory",
+      "transport": "serial",
+      "pending_clear_required": false,
+      "expected_sw": "unknown",
+      "observed_sw": "3.0.0",
+      "observed_partition": "factory",
+      "version": "HW:Uninitialized|SW:3.0.0|Build:Mar 13 202",
+      "ota_diag": {},
+      "boot_info": "UNKNOWN_COMMAND:GET_BOOT_INFO",
+      "logs_excerpt": "",
+      "errors": [
+        "Expected Build 2026-03-13, observed 'Mar 13 202'"
+      ],
+      "started_at": "2026-08-24T15:57:38.892331+00:00",
+      "ended_at": "2026-08-24T15:57:55.899715+00:00",
+      "duration_s": 17.01
+    },
+    {
+      "name": "ota1",
+      "passed": false,
+      "expected_partition": "ota_0",
+      "transport": "ble",
+      "pending_clear_required": true,
+      "expected_sw": "4.2.8-regA",
+      "observed_sw": null,
+      "observed_partition": null,
+      "version": null,
+      "ota_diag": null,
+      "boot_info": null,
+      "logs_excerpt": null,
+      "errors": [
+        "OTA pending verification did not clear within 180s; last diag={}"
+      ],
+      "started_at": "2026-08-24T16:15:04.544416+00:00",
+      "ended_at": "2026-08-24T16:18:13.351723+00:00",
+      "duration_s": 188.81
+    },
+    {
+      "name": "ota2",
+      "passed": true,
+      "expected_partition": "ota_1",
+      "transport": "ble",
+      "pending_clear_required": true,
+      "expected_sw": "4.2.8-regB",
+      "observed_sw": "4.2.8-regB",
+      "observed_partition": "ota_1",
+      "version": "HW:Uninitialized|SW:4.2.8-regB|Build:2026-08-24",
+      "ota_diag": {
+        "pending": "0",
+        "attempts": "0",
+        "streak": "2",
+        "target": "17",
+        "last_trigger": "none",
+        "from": "ota_1",
+        "to": "",
+        "reset": "unknown",
+        "md5": "af8d83f8",
+        "size": "953152",
+        "reason": "",
+        "seq": "0",
+        "tail_len": "0"
+      },
+      "boot_info": "BOOT_INFO:reset=usb,code=11,phase=boot_complete:cold,coredump=0,coredump_size=0",
+      "logs_excerpt": "power_test,10091,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,53789,0,[display] start vIdle=14.27 capDuty=255 steps=3\npower_test,98084,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,108241,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,188686,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,198850,0,[display] start vIdle=14.25 capDuty=255 steps=3\npower_test,233022,0,[batt_full_learn] vFullMv 1550.0->1708.4 reset_to_seed VMON_CAL=1708.3mV Battery=12.60V\npower_test,237401,0,[batt_full_learn] vFullMv 1708.4->1708.7 reset_to_seed VMON_CAL=1708.4mV Battery=12.60V\npower_test,274896,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,292857,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,346962,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,526027,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,706028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,886028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,2899,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,13068,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,17166,0,[flush_button] done usable=79%\nflush_event,17836,0,start\npower_test,18084,0,[flush_preflight] PASS gates_ok usable=100%\nflush_step,18090,1,from_0,step=0,cut=1,feed=1,bat=12.6,temp=28.7,m1A=0.00,heaterA=0.00,fan=off\nflush_step,27345,2,from_1,step=1,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.00,heaterA=0.00,fan=forward\nflush_step,27363,3,from_2,step=2,cut=1,feed=1,bat=12.4,temp=29.3,m1A=1.07,heaterA=0.00,fan=forward\nflush_step,27380,4,from_3,step=3,cut=1,feed=1,bat=12.4,temp=29.3,m1A=0.49,heaterA=0.00,fan=reverse\nflush_step,27395,5,from_4,step=4,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.24,heaterA=0.00,fan=reverse\nflush_step,40623,6,from_5,step=5,cut=1,feed=1,bat=12.6,temp=29.1,m1A=0.00,heaterA=0.00,fan=off\nruntime,4937,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=54.4,m1A=0.00,heaterA=0.00,fan=off\nrun",
+      "errors": [],
+      "started_at": "2026-08-24T16:35:39.079786+00:00",
+      "ended_at": "2026-08-24T16:36:39.284343+00:00",
+      "duration_s": 60.2
+    },
+    {
+      "name": "rollback_previous",
+      "passed": true,
+      "expected_partition": "ota_0",
+      "transport": "ble",
+      "pending_clear_required": false,
+      "expected_sw": "4.2.8-regA",
+      "observed_sw": "4.2.8-regA",
+      "observed_partition": "ota_0",
+      "version": "HW:Uninitialized|SW:4.2.8-regA|Build:2026-08-24",
+      "ota_diag": {
+        "pending": "0",
+        "attempts": "0",
+        "streak": "0",
+        "target": "255",
+        "last_trigger": "manual",
+        "from": "ota_1",
+        "to": "ota_0",
+        "reset": "usb",
+        "md5": "af8d83f8",
+        "size": "953152",
+        "reason": "manual_support_request",
+        "seq": "1",
+        "tail_len": "1024",
+        "log_tail": "5,temp=52.3,m1A=0.00,heaterA=0.00,fan=off~runtime,53359,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=52.3,m1A=0.00,heaterA=0.00,fan=off~power_test,3485,0,[display] start vIdle"
+      },
+      "boot_info": "BOOT_INFO:reset=sw,code=3,phase=boot_complete:cold,coredump=0,coredump_size=0",
+      "logs_excerpt": "power_test,10091,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,53789,0,[display] start vIdle=14.27 capDuty=255 steps=3\npower_test,98084,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,108241,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,188686,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,198850,0,[display] start vIdle=14.25 capDuty=255 steps=3\npower_test,233022,0,[batt_full_learn] vFullMv 1550.0->1708.4 reset_to_seed VMON_CAL=1708.3mV Battery=12.60V\npower_test,237401,0,[batt_full_learn] vFullMv 1708.4->1708.7 reset_to_seed VMON_CAL=1708.4mV Battery=12.60V\npower_test,274896,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,292857,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,346962,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,526027,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,706028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,886028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,2899,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,13068,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,17166,0,[flush_button] done usable=79%\nflush_event,17836,0,start\npower_test,18084,0,[flush_preflight] PASS gates_ok usable=100%\nflush_step,18090,1,from_0,step=0,cut=1,feed=1,bat=12.6,temp=28.7,m1A=0.00,heaterA=0.00,fan=off\nflush_step,27345,2,from_1,step=1,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.00,heaterA=0.00,fan=forward\nflush_step,27363,3,from_2,step=2,cut=1,feed=1,bat=12.4,temp=29.3,m1A=1.07,heaterA=0.00,fan=forward\nflush_step,27380,4,from_3,step=3,cut=1,feed=1,bat=12.4,temp=29.3,m1A=0.49,heaterA=0.00,fan=reverse\nflush_step,27395,5,from_4,step=4,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.24,heaterA=0.00,fan=reverse\nflush_step,40623,6,from_5,step=5,cut=1,feed=1,bat=12.6,temp=29.1,m1A=0.00,heaterA=0.00,fan=off\nruntime,4937,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=54.4,m1A=0.00,heaterA=0.00,fan=off\nrun",
+      "errors": [],
+      "started_at": "2026-08-24T16:37:03.925415+00:00",
+      "ended_at": "2026-08-24T16:37:28.080271+00:00",
+      "duration_s": 24.15
+    },
+    {
+      "name": "ota3",
+      "passed": true,
+      "expected_partition": "ota_1",
+      "transport": "ble",
+      "pending_clear_required": true,
+      "expected_sw": "4.2.8-regB",
+      "observed_sw": "4.2.8-regB",
+      "observed_partition": "ota_1",
+      "version": "HW:Uninitialized|SW:4.2.8-regB|Build:2026-08-24",
+      "ota_diag": {
+        "pending": "0",
+        "attempts": "0",
+        "streak": "2",
+        "target": "17",
+        "last_trigger": "manual",
+        "from": "ota_1",
+        "to": "ota_0",
+        "reset": "usb",
+        "md5": "af8d83f8",
+        "size": "953152",
+        "reason": "manual_support_request",
+        "seq": "1",
+        "tail_len": "1024",
+        "log_tail": "5,temp=52.3,m1A=0.00,heaterA=0.00,fan=off~runtime,53359,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=52.3,m1A=0.00,heaterA=0.00,fan=off~power_test,3485,0,[display] start vIdle"
+      },
+      "boot_info": "BOOT_INFO:reset=usb,code=11,phase=boot_complete:cold,coredump=0,coredump_size=0",
+      "logs_excerpt": "power_test,10091,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,53789,0,[display] start vIdle=14.27 capDuty=255 steps=3\npower_test,98084,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,108241,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,188686,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,198850,0,[display] start vIdle=14.25 capDuty=255 steps=3\npower_test,233022,0,[batt_full_learn] vFullMv 1550.0->1708.4 reset_to_seed VMON_CAL=1708.3mV Battery=12.60V\npower_test,237401,0,[batt_full_learn] vFullMv 1708.4->1708.7 reset_to_seed VMON_CAL=1708.4mV Battery=12.60V\npower_test,274896,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,292857,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,346962,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,526027,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,706028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,886028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,2899,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,13068,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,17166,0,[flush_button] done usable=79%\nflush_event,17836,0,start\npower_test,18084,0,[flush_preflight] PASS gates_ok usable=100%\nflush_step,18090,1,from_0,step=0,cut=1,feed=1,bat=12.6,temp=28.7,m1A=0.00,heaterA=0.00,fan=off\nflush_step,27345,2,from_1,step=1,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.00,heaterA=0.00,fan=forward\nflush_step,27363,3,from_2,step=2,cut=1,feed=1,bat=12.4,temp=29.3,m1A=1.07,heaterA=0.00,fan=forward\nflush_step,27380,4,from_3,step=3,cut=1,feed=1,bat=12.4,temp=29.3,m1A=0.49,heaterA=0.00,fan=reverse\nflush_step,27395,5,from_4,step=4,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.24,heaterA=0.00,fan=reverse\nflush_step,40623,6,from_5,step=5,cut=1,feed=1,bat=12.6,temp=29.1,m1A=0.00,heaterA=0.00,fan=off\nruntime,4937,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=54.4,m1A=0.00,heaterA=0.00,fan=off\nrun",
+      "errors": [],
+      "started_at": "2026-08-24T16:54:38.672248+00:00",
+      "ended_at": "2026-08-24T16:55:43.262330+00:00",
+      "duration_s": 64.59
+    },
+    {
+      "name": "ota4",
+      "passed": true,
+      "expected_partition": "ota_0",
+      "transport": "ble",
+      "pending_clear_required": true,
+      "expected_sw": "4.2.8-regA",
+      "observed_sw": "4.2.8-regA",
+      "observed_partition": "ota_0",
+      "version": "HW:Uninitialized|SW:4.2.8-regA|Build:2026-08-24",
+      "ota_diag": {
+        "pending": "0",
+        "attempts": "0",
+        "streak": "2",
+        "target": "16",
+        "last_trigger": "manual",
+        "from": "ota_0",
+        "to": "ota_0",
+        "reset": "usb",
+        "md5": "be33572a",
+        "size": "953152",
+        "reason": "manual_support_request",
+        "seq": "1",
+        "tail_len": "1024",
+        "log_tail": "5,temp=52.3,m1A=0.00,heaterA=0.00,fan=off~runtime,53359,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=52.3,m1A=0.00,heaterA=0.00,fan=off~power_test,3485,0,[display] start vIdle"
+      },
+      "boot_info": "BOOT_INFO:reset=usb,code=11,phase=boot_complete:cold,coredump=0,coredump_size=0",
+      "logs_excerpt": "power_test,10091,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,53789,0,[display] start vIdle=14.27 capDuty=255 steps=3\npower_test,98084,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,108241,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,188686,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,198850,0,[display] start vIdle=14.25 capDuty=255 steps=3\npower_test,233022,0,[batt_full_learn] vFullMv 1550.0->1708.4 reset_to_seed VMON_CAL=1708.3mV Battery=12.60V\npower_test,237401,0,[batt_full_learn] vFullMv 1708.4->1708.7 reset_to_seed VMON_CAL=1708.4mV Battery=12.60V\npower_test,274896,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,292857,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,346962,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,526027,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,706028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,886028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,2899,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,13068,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,17166,0,[flush_button] done usable=79%\nflush_event,17836,0,start\npower_test,18084,0,[flush_preflight] PASS gates_ok usable=100%\nflush_step,18090,1,from_0,step=0,cut=1,feed=1,bat=12.6,temp=28.7,m1A=0.00,heaterA=0.00,fan=off\nflush_step,27345,2,from_1,step=1,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.00,heaterA=0.00,fan=forward\nflush_step,27363,3,from_2,step=2,cut=1,feed=1,bat=12.4,temp=29.3,m1A=1.07,heaterA=0.00,fan=forward\nflush_step,27380,4,from_3,step=3,cut=1,feed=1,bat=12.4,temp=29.3,m1A=0.49,heaterA=0.00,fan=reverse\nflush_step,27395,5,from_4,step=4,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.24,heaterA=0.00,fan=reverse\nflush_step,40623,6,from_5,step=5,cut=1,feed=1,bat=12.6,temp=29.1,m1A=0.00,heaterA=0.00,fan=off\nruntime,4937,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=54.4,m1A=0.00,heaterA=0.00,fan=off\nrun",
+      "errors": [],
+      "started_at": "2026-08-24T17:12:40.597671+00:00",
+      "ended_at": "2026-08-24T17:13:46.608645+00:00",
+      "duration_s": 66.01
+    },
+    {
+      "name": "factory_reset",
+      "passed": false,
+      "expected_partition": "factory",
+      "transport": "ble",
+      "pending_clear_required": false,
+      "expected_sw": "unknown",
+      "observed_sw": "3.0.0",
+      "observed_partition": "factory",
+      "version": "HW:Uninitialized|SW:3.0.0|Build:Mar 13 202",
+      "ota_diag": {},
+      "boot_info": "UNKNOWN_COMMAND:GET_BOOT_INFO",
+      "logs_excerpt": "mcp,3463,0,MCP_UNAVAILABLE",
+      "errors": [
+        "Expected Build 2026-03-13, observed 'Mar 13 202'"
+      ],
+      "started_at": "2026-08-24T17:14:11.438212+00:00",
+      "ended_at": "2026-08-24T17:14:29.309512+00:00",
+      "duration_s": 17.87
+    },
+    {
+      "name": "ota5",
+      "passed": true,
+      "expected_partition": "ota_0",
+      "transport": "ble",
+      "pending_clear_required": true,
+      "expected_sw": "4.2.8-regB",
+      "observed_sw": "4.2.8-regB",
+      "observed_partition": "ota_0",
+      "version": "HW:Uninitialized|SW:4.2.8-regB|Build:2026-08-24",
+      "ota_diag": {
+        "pending": "0",
+        "attempts": "0",
+        "streak": "0",
+        "target": "255",
+        "last_trigger": "manual",
+        "from": "ota_0",
+        "to": "factory",
+        "reset": "usb",
+        "md5": "be33572a",
+        "size": "953152",
+        "reason": "factory_request",
+        "seq": "2",
+        "tail_len": "1024",
+        "log_tail": "CP_UNAVAILABLE~panic_pending,263,0,phase=boot_complete:cold,uptime_ms=1020345,step=0,heater=0,pending_rr=0~mcp,3482,0,MCP_UNAVAILABLE~ota_boot,3791,3,attempt=1,streak=0,reset=sw,pa"
+      },
+      "boot_info": "BOOT_INFO:reset=sw,code=3,phase=boot_complete:cold,coredump=0,coredump_size=0",
+      "logs_excerpt": "power_test,10091,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,53789,0,[display] start vIdle=14.27 capDuty=255 steps=3\npower_test,98084,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,108241,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,188686,0,[display] start vIdle=14.26 capDuty=255 steps=3\npower_test,198850,0,[display] start vIdle=14.25 capDuty=255 steps=3\npower_test,233022,0,[batt_full_learn] vFullMv 1550.0->1708.4 reset_to_seed VMON_CAL=1708.3mV Battery=12.60V\npower_test,237401,0,[batt_full_learn] vFullMv 1708.4->1708.7 reset_to_seed VMON_CAL=1708.4mV Battery=12.60V\npower_test,274896,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,292857,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,346962,0,[display] start vIdle=12.59 capDuty=255 steps=3\npower_test,526027,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,706028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,886028,0,[get_battery] start vIdle=12.59 capDuty=255 steps=3\npower_test,2899,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,13068,0,[display] start vIdle=12.60 capDuty=255 steps=3\npower_test,17166,0,[flush_button] done usable=79%\nflush_event,17836,0,start\npower_test,18084,0,[flush_preflight] PASS gates_ok usable=100%\nflush_step,18090,1,from_0,step=0,cut=1,feed=1,bat=12.6,temp=28.7,m1A=0.00,heaterA=0.00,fan=off\nflush_step,27345,2,from_1,step=1,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.00,heaterA=0.00,fan=forward\nflush_step,27363,3,from_2,step=2,cut=1,feed=1,bat=12.4,temp=29.3,m1A=1.07,heaterA=0.00,fan=forward\nflush_step,27380,4,from_3,step=3,cut=1,feed=1,bat=12.4,temp=29.3,m1A=0.49,heaterA=0.00,fan=reverse\nflush_step,27395,5,from_4,step=4,cut=1,feed=1,bat=12.5,temp=29.3,m1A=0.24,heaterA=0.00,fan=reverse\nflush_step,40623,6,from_5,step=5,cut=1,feed=1,bat=12.6,temp=29.1,m1A=0.00,heaterA=0.00,fan=off\nruntime,4937,1,motor_timeout,step=0,cut=0,feed=1,bat=12.5,temp=54.4,m1A=0.00,heaterA=0.00,fan=off\nrun",
+      "errors": [],
+      "started_at": "2026-08-24T17:31:36.940345+00:00",
+      "ended_at": "2026-08-24T17:32:11.238225+00:00",
+      "duration_s": 34.3
+    }
+  ],
+  "failures": [
+    "flash_factory: Expected Build 2026-03-13, observed 'Mar 13 202'",
+    "ota1: OTA pending verification did not clear within 180s; last diag={}",
+    "factory_reset: Expected Build 2026-03-13, observed 'Mar 13 202'",
+    "Partition sequence mismatch: expected ['factory', 'ota_0', 'ota_1', 'ota_0', 'ota_1', 'ota_0', 'factory', 'ota_0'], observed ['ota_1', 'ota_0', 'ota_1', 'ota_0', 'ota_0']"
+  ],
+  "metadata": {
+    "preflight": {
+      "fast_mode": false,
+      "auto_build": false,
+      "factory": {
+        "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\factory_sarah.bin",
+        "size": 4718592,
+        "md5": "ecb6d40150f0e21788ba7e25b5c8cca0",
+        "sha256": "697c3371dbb0e09183a046a28197f8debe0f0047ba60d861328d322772474bab"
+      },
+      "ota": [
+        {
+          "label": "ota1",
+          "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regA.bin",
+          "size": 953152,
+          "md5": "be33572a9084d6570ee3c60de915d06f",
+          "sha256": "0ba696bb548b671661b2393f388f84315272f82bb7f37ed923ce55758496d9a9",
+          "expected_sw": "4.2.8-regA",
+          "expected_build": "2026-08-24"
+        },
+        {
+          "label": "ota2",
+          "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regB.bin",
+          "size": 953152,
+          "md5": "af8d83f8ed5ec0573f15ecbeadcd15b0",
+          "sha256": "00219c4925a8ee86da97a4162a0fe45596c34be6ddd29405ec45330f1a8f5b3d",
+          "expected_sw": "4.2.8-regB",
+          "expected_build": "2026-08-24"
+        },
+        {
+          "label": "ota3",
+          "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regB.bin",
+          "size": 953152,
+          "md5": "af8d83f8ed5ec0573f15ecbeadcd15b0",
+          "sha256": "00219c4925a8ee86da97a4162a0fe45596c34be6ddd29405ec45330f1a8f5b3d",
+          "expected_sw": "4.2.8-regB",
+          "expected_build": "2026-08-24"
+        },
+        {
+          "label": "ota4",
+          "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regA.bin",
+          "size": 953152,
+          "md5": "be33572a9084d6570ee3c60de915d06f",
+          "sha256": "0ba696bb548b671661b2393f388f84315272f82bb7f37ed923ce55758496d9a9",
+          "expected_sw": "4.2.8-regA",
+          "expected_build": "2026-08-24"
+        },
+        {
+          "label": "ota5",
+          "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regB.bin",
+          "size": 953152,
+          "md5": "af8d83f8ed5ec0573f15ecbeadcd15b0",
+          "sha256": "00219c4925a8ee86da97a4162a0fe45596c34be6ddd29405ec45330f1a8f5b3d",
+          "expected_sw": "4.2.8-regB",
+          "expected_build": "2026-08-24"
+        }
+      ],
+      "manifest": {
+        "auto_build": true,
+        "base_version": "4.2.8",
+        "build_date": "2026-08-24",
+        "sarah_merged": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\FACTORY_BINARIES\\SARAH_toilet_kat_change.ino.merged.bin",
+        "factory": {
+          "path": "test-builds/ota-regression/factory_sarah.bin",
+          "expected_sw": "unknown",
+          "expected_build": "2026-03-13",
+          "md5": "ecb6d40150f0e21788ba7e25b5c8cca0",
+          "size": 4718592
+        },
+        "variants": {
+          "regA": {
+            "path": "test-builds/ota-regression/ota_regA.bin",
+            "expected_sw": "4.2.8-regA",
+            "expected_build": "2026-08-24",
+            "md5": "be33572a9084d6570ee3c60de915d06f",
+            "size": "953152"
+          },
+          "regB": {
+            "path": "test-builds/ota-regression/ota_regB.bin",
+            "expected_sw": "4.2.8-regB",
+            "expected_build": "2026-08-24",
+            "md5": "af8d83f8ed5ec0573f15ecbeadcd15b0",
+            "size": "953152"
+          }
+        },
+        "ota": [
+          {
+            "label": "ota1",
+            "variant": "regA",
+            "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regA.bin",
+            "expected_sw": "4.2.8-regA",
+            "expected_build": "2026-08-24"
+          },
+          {
+            "label": "ota2",
+            "variant": "regB",
+            "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regB.bin",
+            "expected_sw": "4.2.8-regB",
+            "expected_build": "2026-08-24"
+          },
+          {
+            "label": "ota3",
+            "variant": "regB",
+            "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regB.bin",
+            "expected_sw": "4.2.8-regB",
+            "expected_build": "2026-08-24"
+          },
+          {
+            "label": "ota4",
+            "variant": "regA",
+            "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regA.bin",
+            "expected_sw": "4.2.8-regA",
+            "expected_build": "2026-08-24"
+          },
+          {
+            "label": "ota5",
+            "variant": "regB",
+            "path": "C:\\Users\\richa\\Documents\\GitHub\\toilet_kat_change\\test-builds\\ota-regression\\ota_regB.bin",
+            "expected_sw": "4.2.8-regB",
+            "expected_build": "2026-08-24"
+          }
+        ]
+      },
+      "initial_usb_partition": "ota_unspecified",
+      "ble_address": "A4:CB:8F:DD:1A:A9",
+      "dev_mode": {
+        "address": "A4:CB:8F:DD:1A:A9",
+        "initial_dev_mode": 1
+      },
+      "baseline": {
+        "version": "HW:Uninitialized|SW:4.2.8|Build:2026-08-24",
+        "ota_diag": "OTA_DIAG:EMPTY",
+        "boot_info": "BOOT_INFO:reset=usb,code=11,phase=boot_complete:cold,coredump=0,coredump_size=0"
+      }
+    },
+    "manifest": null,
+    "start_from": "flash_factory"
+  }
+}

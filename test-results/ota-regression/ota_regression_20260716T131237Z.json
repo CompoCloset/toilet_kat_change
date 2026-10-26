@@ -1,0 +1,48 @@
+{
+  "run_id": "20260716T131237Z",
+  "started_at": "2026-07-16T13:12:37.584861+00:00",
+  "ended_at": "2026-07-16T13:14:35.280837+00:00",
+  "passed": false,
+  "dry_run": false,
+  "fast_mode": false,
+  "auto_build": false,
+  "port": "COM7",
+  "address": "3C:DC:75:FC:62:5D",
+  "partition_sequence": [],
+  "steps": [
+    {
+      "name": "flash_factory",
+      "passed": false,
+      "expected_partition": "factory",
+      "transport": "serial",
+      "pending_clear_required": false,
+      "expected_sw": "unknown",
+      "observed_sw": "3.0.0",
+      "observed_partition": "factory",
+      "version": "HW:Uninitialized|SW:3.0.0|Build:Mar 13 202",
+      "ota_diag": {},
+      "boot_info": "UNKNOWN_COMMAND:GET_BOOT_INFO",
+      "logs_excerpt": "",
+      "errors": [
+        "Expected Build 2026-03-13, observed 'Mar 13 202'"
+      ],
+      "started_at": "2026-07-16T13:13:15.325423+00:00",
+      "ended_at": "2026-07-16T13:13:32.955957+00:00",
+      "duration_s": 17.63
+    }
+  ],
+  "failures": [
+    "flash_factory: Expected Build 2026-03-13, observed 'Mar 13 202'",
+    "OTA update failed for ota1; ble_state=failed detail='firmware transfer failed'",
+    "Partition sequence mismatch: expected ['factory', 'ota_0', 'ota_1', 'ota_0', 'ota_1', 'ota_0', 'factory', 'ota_0'], observed []"
+  ],
+  "metadata": {
+    "preflight": {
+      "skipped": true,
+      "start_from": "flash_factory",
+      "ble_address": "3C:DC:75:FC:62:5D"
+    },
+    "manifest": null,
+    "start_from": "flash_factory"
+  }
+}

@@ -22,8 +22,10 @@
 #include <esp_core_dump.h>
 #include <esp_partition.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include "ota_diag_types.h"
+#include "battery_ntc_table.h"
 #define LED_PHASE_COUNT 5
 
 // Error log (SPIFFS, bounded, BLE-retrievable)
@@ -65,6 +67,11 @@ const int heaterCurrentPin = 12; // GPIO12 (HS_OUT) - Heater current sense outpu
 // Battery voltage monitoring
 const int batteryVoltagePin = 10;  // GPIO10 (VMON) - Battery voltage monitoring
 const int batteryTempPin = 5;      // GPIO5 (B_TEMP) - Battery temperature monitoring
+// Fixed leg of the B_TEMP divider. No schematic is in the repo; this is the
+// 10 kΩ already used by the previous beta conversion.
+// Formula below treats the NTC as the upper leg: 3.3V -> NTC -> GPIO5 -> 10k -> GND.
+constexpr float kBatteryTempFixedOhms = 10000.0f;
+constexpr int kBatteryTempAdcSamples = 8;
 // ESP32-S3 ADC: trimmed mean of oneshots; drop outliers then average
 const int ADC_AVG_SAMPLES = 32;
 const int ADC_AVG_TRIM = 2;
@@ -104,6 +111,7 @@ unsigned long lastMcpUnavailableLogMillis = 0;
 const unsigned long MCP_UNAVAILABLE_LOG_INTERVAL_MS = 5000;
 
 int lastFanState = 0;  // 0=off, 1=forward, -1=reverse (for error log context)
+int lastAuxFanLevel = -1;  // -1 unknown, HIGH/LOW last driven on auxFanPin
 bool errorLogInitialized = false;
 
 #define SERVICE_UUID "5636340f-afc7-47b1-b0a8-15bc9d7d29a5"
@@ -129,6 +137,7 @@ BLECharacteristic * update_characteristic;
 BLEServer * blue_server;
 BLEService * update_service;
 bool is_device_connected, old_device_connect = false;
+volatile bool pendingIdleLedClear = false;
 bool serial_streaming_enabled = false;
 
 // Trust handshake state (BLE_APP_MIGRATION_SPEC, BLE_HANDSHAKE_INTERFACE_SPEC)
@@ -317,14 +326,14 @@ struct HWCFGConfigStore {
 #  if __has_include("software_version_build.h")
 #    include "software_version_build.h"
 #  else
-const char* SOFTWARE_VERSION_NUMBER = "4.2.8";
+const char* SOFTWARE_VERSION_NUMBER = "4.2.9";
 const char* FACTORY_SOFTWARE_DATE = "2026-06-18";
-const char* SOFTWARE_BUILD_DATE = "2026-08-24";  // YYYY-MM-DD — update with each build
+const char* SOFTWARE_BUILD_DATE = "2026-10-26";  // YYYY-MM-DD — update with each build
 #  endif
 #else
-const char* SOFTWARE_VERSION_NUMBER = "4.2.8";
+const char* SOFTWARE_VERSION_NUMBER = "4.2.9";
 const char* FACTORY_SOFTWARE_DATE = "2026-06-18";
-const char* SOFTWARE_BUILD_DATE = "2026-08-24";  // YYYY-MM-DD — update with each build
+const char* SOFTWARE_BUILD_DATE = "2026-10-26";  // YYYY-MM-DD — update with each build
 #endif
 
 // Forward declarations
@@ -370,6 +379,7 @@ int getLedPin(int uiIndex);
 void logControlPanelPinout();
 bool readControlPanelButton1();
 bool readControlPanelButton2();
+void pollUsbTestCommands();
 bool readControlPanelWakeLine();
 bool readFlushCancelInput(bool button1Pressed, bool button2Pressed);
 bool lookupHardwareComponentId(const String& componentName, HardwareComponentId& outId);
@@ -397,6 +407,15 @@ float readBatteryVoltageQuiet();
 bool sampleBatteryVoltage(BatteryVoltageSample* out);
 float sampleBatteryVoltage(float* outAdc, float* outMvCal);
 float readHeaterCurrentQuiet();
+struct BatteryTempSample {
+  int adc;
+  float voltage;
+  float resistanceOhms;
+  float tempC;
+  bool valid;
+  const char* error;
+};
+bool sampleBatteryTemperature(BatteryTempSample* out);
 float readBatteryTemperatureQuiet();
 bool measureBatteryUnderLoad(float* vIdle, float* vLoad, int testDuty, uint16_t settleMs, const char* testTag = nullptr);
 int getHeaterPwmCapForVoltage(float batteryV);
@@ -574,7 +593,6 @@ bool abortFlushForCancel();
 void abortFlushPreflight(bool showErrorLed);
 bool flushOwnsControlPanelLeds();
 void clearControlPanelLedsIfIdle();
-bool isDeviceIdleForDualButton();
 bool acceptFlushCancel(bool button1Pressed, bool button2Pressed);
 void maintainCancelRecoveryLeds();
 
@@ -588,6 +606,7 @@ static const int ledPinsV2_0[] = {1, 9, 13, 14, 10, 6, 11, 12, 8, 0, 2, 3, 4, 5}
 static const int ledPinsV6[] = {1, 9, 13, 15, 10, 7, 11, 12, 8, 0, 2, 3, 4, 5};
 const int totalLeds = 14;
 int ledIndex = 0;
+uint16_t controlPanelLedShadow = 0;
 bool clockwise = true; // Direction flag for LED cycling
 const float HARDWARE_DISCONNECT_RESISTANCE_OHMS = 100000.0;
 const float THERMISTOR_VOLTAGE_GUARD_V = 0.01;
@@ -762,6 +781,7 @@ unsigned long batteryDisplayStartTime = 0;
 bool button1DisconnectAlertedForCurrentPress = false;
 bool button2DisconnectAlertedForCurrentPress = false;
 bool flushCancelArmed = false;
+uint8_t flushCancelConfirmSamples = 0;
 const int MANUAL_FEED_FULL_SPEED = -400;
 const int MANUAL_FEED_START_SPEED = MANUAL_FEED_FULL_SPEED / 5; // 20% feed speed.
 const unsigned long MANUAL_FEED_RAMP_MS = 5000;
@@ -851,6 +871,13 @@ const char* HW_MATRIX_NAMESPACE = "hwmeta";
 const char* HW_MATRIX_ACTIVE_KEY = "matrix";
 const char* HW_MATRIX_LAST_GOOD_KEY = "matrix_lkg";
 bool devModeEnabled = false;
+// USB injection. Not stored. Independent of devModeEnabled.
+bool testModeEnabled = false;
+bool usbTestButton1 = false;
+bool usbTestButton2 = false;
+bool usbTempOverride = false;
+float usbTempC = 0.0f;
+bool usbThermOpen = false;
 // M1/M2 fault handling controls.
 bool ignoreM12Faults = false;
 bool hasIgnoredM12Fault = false;
@@ -1122,6 +1149,7 @@ const uint8_t M2NFAULT_PIN = 11; // GPIO11 (M2NFAULT)
 const int sealerFanPWM = 47;       // PWM input, 25 kHz
 const int sealerFanPwr = 4;        // Power enable (transistor)
 const int sealerFanReverse = 21;   // HIGH = reverse
+const int auxFanPin = 18;          // Auxiliary fan, active HIGH
 const int FAN_PWM_FREQ = 25000;
 const int FAN_PWM_RESOLUTION = 8;
 
@@ -1221,7 +1249,8 @@ void trustDoubleBeep() {
 void resetTrustState() {
   g_trustState = TRUST_STATE_UNTRUSTED;
   g_trustStartMs = 0;
-  clearControlPanelLedsIfIdle();
+  // BLE callbacks must not touch the MCP. loop() clears idle LEDs when no flush owns them.
+  pendingIdleLedClear = true;
 }
 
 void beginTrustWaiting() {
@@ -1570,6 +1599,25 @@ class command_characteristic_callbacks: public BLECharacteristicCallbacks {
       writeResponseToChannel(String(debugLine));
       Serial.printf("Processed GET_BATTERY_DEBUG, returned %s\n", debugLine);
       sendSerialToBLE("Processed GET_BATTERY_DEBUG");
+      return;
+    }
+    if (cmd == "GET_BATTERY_TEMP") {
+      BatteryTempSample sample;
+      sampleBatteryTemperature(&sample);
+      char tempLine[96];
+      if (sample.valid) {
+        snprintf(tempLine, sizeof(tempLine), "BATT_TEMP:%.1fC,ADC=%d,R=%.0f",
+                 sample.tempC, sample.adc, sample.resistanceOhms);
+      } else if (sample.resistanceOhms > 0.0f) {
+        snprintf(tempLine, sizeof(tempLine), "BATT_TEMP_ERR:%s,ADC=%d,R=%.0f",
+                 sample.error ? sample.error : "RANGE", sample.adc, sample.resistanceOhms);
+      } else {
+        snprintf(tempLine, sizeof(tempLine), "BATT_TEMP_ERR:%s,ADC=%d",
+                 sample.error ? sample.error : "RANGE", sample.adc);
+      }
+      writeResponseToChannel(String(tempLine));
+      Serial.printf("Processed GET_BATTERY_TEMP, returned %s\n", tempLine);
+      sendSerialToBLE("Processed GET_BATTERY_TEMP");
       return;
     }
     if (cmd == "RESET_BATTERY_CAL") {
@@ -2080,6 +2128,39 @@ int mcp_digitalRead(int pin) {
   return mcp.digitalRead(pin);
 }
 
+// ESP32 Arduino 3.x TwoWire has no lastError(). A button sample is valid only when
+// the GPIOAB transaction itself succeeds. Failure reports released (not pressed).
+bool mcpReadInputLow(int pin) {
+  if (!mcpInitialized || pin < 0 || pin > 15) {
+    return false;
+  }
+  const uint8_t addr = 0x20;
+  const uint8_t gpioAbReg = 0x12;  // GPIOA, BANK=0
+  myI2C.beginTransmission(addr);
+  myI2C.write(gpioAbReg);
+  if (myI2C.endTransmission(false) != 0) {
+    return false;
+  }
+  if (myI2C.requestFrom(addr, (size_t)2, true) != 2) {
+    return false;
+  }
+  uint8_t gpioA = (uint8_t)myI2C.read();
+  uint8_t gpioB = (uint8_t)myI2C.read();
+  uint16_t gpio = (uint16_t)gpioA | ((uint16_t)gpioB << 8);
+  return ((gpio >> pin) & 0x1) == 0;
+}
+
+bool noteFlushCancelSample(bool pressed) {
+  if (!pressed) {
+    flushCancelConfirmSamples = 0;
+    return false;
+  }
+  if (flushCancelConfirmSamples < 2) {
+    flushCancelConfirmSamples++;
+  }
+  return flushCancelConfirmSamples >= 2;
+}
+
 void logControlPanelPinout() {
   ControlPanelPinout pinout = getControlPanelPinout();
   if (pinout == CP_PINOUT_V6) {
@@ -2096,24 +2177,167 @@ void logControlPanelPinout() {
 
 bool readControlPanelButton1() {
   ControlPanelPinout pinout = getControlPanelPinout();
+  bool pressed;
   if (pinout == CP_PINOUT_V6) {
-    return mcp_digitalRead(CP_V6_BTN1_MCP) == LOW;
+    pressed = mcpReadInputLow(CP_V6_BTN1_MCP);
+  } else if (pinout == CP_PINOUT_V2_2) {
+    pressed = mcpReadInputLow(CP_V2_2_BTN1_MCP);
+  } else {
+    pressed = digitalRead(controlPanelWake) == LOW;
   }
-  if (pinout == CP_PINOUT_V2_2) {
-    return mcp_digitalRead(CP_V2_2_BTN1_MCP) == LOW;
-  }
-  return digitalRead(controlPanelWake) == LOW;
+  return pressed || (testModeEnabled && usbTestButton1);
 }
 
 bool readControlPanelButton2() {
   ControlPanelPinout pinout = getControlPanelPinout();
+  bool pressed;
   if (pinout == CP_PINOUT_V6) {
-    return mcp_digitalRead(CP_V6_BTN2_MCP) == LOW;
+    pressed = mcpReadInputLow(CP_V6_BTN2_MCP);
+  } else if (pinout == CP_PINOUT_V2_2) {
+    pressed = mcpReadInputLow(CP_V2_2_BTN2_MCP);
+  } else {
+    pressed = mcpReadInputLow(CP_V2_0_BTN2_MCP);
   }
-  if (pinout == CP_PINOUT_V2_2) {
-    return mcp_digitalRead(CP_V2_2_BTN2_MCP) == LOW;
+  return pressed || (testModeEnabled && usbTestButton2);
+}
+
+static void setTestModeEnabled(bool enabled) {
+  testModeEnabled = enabled;
+  if (!enabled) {
+    usbTestButton1 = false;
+    usbTestButton2 = false;
+    usbTempOverride = false;
+    usbThermOpen = false;
   }
-  return mcp_digitalRead(CP_V2_0_BTN2_MCP) == LOW;
+}
+
+static bool usbTestModeOrReject() {
+  if (testModeEnabled) {
+    return true;
+  }
+  Serial.println("TEST_MODE_REQUIRED");
+  return false;
+}
+
+static void handleUsbTestLine(char* line) {
+  while (*line == ' ' || *line == '\t') {
+    line++;
+  }
+  if (line[0] == '\0') {
+    return;
+  }
+  if (strcmp(line, "GET_TEST_MODE") == 0) {
+    Serial.printf("TEST_MODE:%d\n", testModeEnabled ? 1 : 0);
+    return;
+  }
+  if (strncmp(line, "TEST_MODE:", 10) == 0) {
+    if (line[10] == '1' && line[11] == '\0') {
+      setTestModeEnabled(true);
+    } else if (line[10] == '0' && line[11] == '\0') {
+      setTestModeEnabled(false);
+    } else {
+      Serial.println("USB_CMD_ERR:BAD_TEST_MODE");
+      return;
+    }
+    Serial.printf("TEST_MODE:%d\n", testModeEnabled ? 1 : 0);
+    return;
+  }
+  if (strncmp(line, "TEMP:", 5) == 0) {
+    if (!usbTestModeOrReject()) {
+      return;
+    }
+    if (strcmp(line + 5, "CLEAR") == 0) {
+      usbTempOverride = false;
+      Serial.println("TEMP:CLEAR");
+      return;
+    }
+    char* end = nullptr;
+    float value = strtof(line + 5, &end);
+    if (end == line + 5 || (end && *end != '\0')) {
+      Serial.println("USB_CMD_ERR:BAD_TEMP");
+      return;
+    }
+    usbTempOverride = true;
+    usbTempC = value;
+    Serial.printf("TEMP:%.1f\n", usbTempC);
+    return;
+  }
+  if (strncmp(line, "THERM:", 6) == 0) {
+    if (!usbTestModeOrReject()) {
+      return;
+    }
+    if (strcmp(line + 6, "OPEN") == 0) {
+      usbThermOpen = true;
+      Serial.println("THERM:OPEN");
+      return;
+    }
+    if (strcmp(line + 6, "CLEAR") == 0) {
+      usbThermOpen = false;
+      Serial.println("THERM:CLEAR");
+      return;
+    }
+    Serial.println("USB_CMD_ERR:BAD_THERM");
+    return;
+  }
+  if (strcmp(line, "CLEAR_FAULT") == 0) {
+    if (!usbTestModeOrReject()) {
+      return;
+    }
+    ERROR_CODE = 0;
+    Serial.println("CLEAR_FAULT");
+    return;
+  }
+  if (strncmp(line, "BUTTON:", 7) == 0) {
+    if (!usbTestModeOrReject()) {
+      return;
+    }
+    int button = line[7] - '0';
+    int level = (line[8] == ':' && line[10] == '\0') ? (line[9] - '0') : -1;
+    if ((button != 1 && button != 2) || (level != 0 && level != 1)) {
+      Serial.println("USB_CMD_ERR:BAD_BUTTON");
+      return;
+    }
+    if (button == 1) {
+      usbTestButton1 = level == 1;
+    } else {
+      usbTestButton2 = level == 1;
+    }
+    Serial.printf("BUTTON:%d:%d\n", button, level);
+    return;
+  }
+  Serial.println("USB_CMD_ERR:UNKNOWN");
+}
+
+void pollUsbTestCommands() {
+  static char line[48];
+  static uint8_t len = 0;
+  static bool overflow = false;
+  while (Serial.available() > 0) {
+    int raw = Serial.read();
+    if (raw < 0) {
+      break;
+    }
+    char ch = (char)raw;
+    if (ch == '\r') {
+      continue;
+    }
+    if (ch != '\n') {
+      if (len < sizeof(line) - 1) {
+        line[len++] = ch;
+      } else {
+        overflow = true;
+      }
+      continue;
+    }
+    line[len] = '\0';
+    len = 0;
+    if (overflow) {
+      overflow = false;
+      Serial.println("USB_CMD_ERR:TOO_LONG");
+      continue;
+    }
+    handleUsbTestLine(line);
+  }
 }
 
 bool readControlPanelWakeLine() {
@@ -2782,14 +3006,25 @@ static String getCurrentContextString() {
   return String(buf);
 }
 
+static uint64_t logTimestampMs() {
+  return esp_rtc_get_time_us() / 1000ULL;
+}
+
 void logError(const char* type, int code, const char* msg) {
   logError(type, code, msg, true);
 }
 
 void logError(const char* type, int code, const char* msg, bool includeContext) {
   if (!errorLogInitialized) return;
-  unsigned long ts = millis();
-  String line = String(type) + "," + String(ts) + "," + String(code) + "," + String(msg);
+  char prefix[96];
+  snprintf(prefix, sizeof(prefix), "%s,%llu,%d,",
+           type ? type : "",
+           (unsigned long long)logTimestampMs(),
+           code);
+  String line = prefix;
+  if (msg) {
+    line += msg;
+  }
   if (includeContext) line += getCurrentContextString();
   if (line.length() > LOG_LINE_MAX_LEN) line = line.substring(0, LOG_LINE_MAX_LEN);
   line += "\n";
@@ -6327,6 +6562,45 @@ bool trimErrorLogToSize(size_t targetBytes) {
   return true;
 }
 
+static const char* LOG_NVS_NAMESPACE = "log";
+static const char* LOG_NVS_BOOT_COUNT_KEY = "boot_count";
+
+// Lifetime full-boot count. Survives power loss. Not incremented on the fan-duty
+// timer path that returns to sleep before initErrorLog().
+static uint32_t nextPersistentBootCount() {
+  nvs_handle_t nvsHandle;
+  esp_err_t err = nvs_open(LOG_NVS_NAMESPACE, NVS_READWRITE, &nvsHandle);
+  if (err != ESP_OK) {
+    Serial.printf("WARN: boot count NVS open failed: %s\n", esp_err_to_name(err));
+    return 0;
+  }
+
+  uint32_t count = 0;
+  err = nvs_get_u32(nvsHandle, LOG_NVS_BOOT_COUNT_KEY, &count);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    count = 0;
+  } else if (err != ESP_OK) {
+    Serial.printf("WARN: boot count NVS read failed: %s\n", esp_err_to_name(err));
+    nvs_close(nvsHandle);
+    return 0;
+  }
+
+  if (count < 0xFFFFFFFFu) {
+    count++;
+  }
+
+  err = nvs_set_u32(nvsHandle, LOG_NVS_BOOT_COUNT_KEY, count);
+  if (err == ESP_OK) {
+    err = nvs_commit(nvsHandle);
+  }
+  nvs_close(nvsHandle);
+  if (err != ESP_OK) {
+    Serial.printf("WARN: boot count NVS write failed: %s\n", esp_err_to_name(err));
+    return 0;
+  }
+  return count;
+}
+
 void logBootStatus() {
   esp_reset_reason_t resetReason = esp_reset_reason();
   const char* reasonStr = resetReasonToString(resetReason);
@@ -6338,6 +6612,13 @@ void logBootStatus() {
                 (unsigned)getErrorLogFileSize());
   if (errorLogInitialized && isAbnormalResetReason(resetReason)) {
     logError("boot_status", (int)resetReason, msg, false);
+  }
+  if (errorLogInitialized) {
+    uint32_t bootCount = nextPersistentBootCount();
+    char wakeMsg[80];
+    snprintf(wakeMsg, sizeof(wakeMsg), "reason=%s,code=%d,boot=%u",
+             reasonStr, (int)resetReason, (unsigned)bootCount);
+    logError("wake", (int)resetReason, wakeMsg, false);
   }
 }
 
@@ -6879,11 +7160,9 @@ void setup() {
   pinMode(sealerFanPwr, OUTPUT);
   pinMode(sealerFanReverse, OUTPUT);
   ledcAttach(sealerFanPWM, FAN_PWM_FREQ, FAN_PWM_RESOLUTION);
-  if (rtcFanScheduleValid) {
-    setFanSpeed(rtcFanOutputOn ? 400 : 0);
-  } else {
-    setFanSpeed(0);
-  }
+  setFanSpeed(0);
+  pinMode(auxFanPin, OUTPUT);
+  applyAuxFanOutput(rtcFanScheduleValid && rtcFanOutputOn);
   initHeaterGpioSafe();
   initHeaterPwm();
   logBootCheckpoint("gpio_safe");
@@ -7043,7 +7322,8 @@ void setup() {
 }
 
 void loop() {
-  
+  pollUsbTestCommands();
+
   if (lastActivityMillis == 0) {
     lastActivityMillis = millis();
   }
@@ -7105,7 +7385,10 @@ void loop() {
   // BLE-specific operations - only run if BLE is enabled and OTA is not active
   if (bleEnabled && !otaEnabled) {
   if (!is_device_connected && old_device_connect) {
-    delay(500);
+    // Idle settle only. A flush must keep servicing heater and LED repaint.
+    if (!flushOwnsControlPanelLeds()) {
+      delay(500);
+    }
     blue_server->startAdvertising();
     old_device_connect = is_device_connected;
   }
@@ -7141,6 +7424,12 @@ void loop() {
   bool button2Pressed = readControlPanelButton2();
   bool bothButtonsPressedNow = button1Pressed && button2Pressed;
   bool flushCancelInputActive = readFlushCancelInput(button1Pressed, button2Pressed);
+  bool flushCancelConfirmed = false;
+  if (isFlushing && flushStep != FLUSH_STEP_CANCEL_COOL) {
+    flushCancelConfirmed = noteFlushCancelSample(bothButtonsPressedNow || flushCancelInputActive);
+  } else if (!isFlushing) {
+    flushCancelConfirmSamples = 0;
+  }
   if (button1Pressed || button2Pressed || flushCancelInputActive) {
     lastActivityMillis = millis();
   }
@@ -7167,10 +7456,19 @@ void loop() {
   } else if (bothButtonsPressedNow && !bothButtonsPressed && !otaEnabled) {
     lastDualButtonEdgeMillis = millis();
     bothButtonsReleaseStartMillis = 0;
-    if (isDeviceIdleForDualButton()) {
-      SerialBLE_println("Both buttons pressed - Stopping all operations and displaying battery charge level");
-
-      stopEverything();
+    if (isFlushing) {
+      if (flushCancelConfirmed) {
+        bool continueFlushRecovery = acceptFlushCancel(button1Pressed, button2Pressed);
+        bothButtonsPressed = true;
+        flushCancelConfirmSamples = 0;
+        feedTaskWatchdog();
+        delay(1);
+        if (!continueFlushRecovery) {
+          return;
+        }
+      }
+    } else {
+      SerialBLE_println("Both buttons pressed - displaying battery charge level");
 
       button1WasPressed = button1Pressed;
       button2WasPressed = button2Pressed;
@@ -7189,28 +7487,6 @@ void loop() {
       batteryDisplayStartTime = millis();
       chargeLedFlashLastMs = 0;
       chargeLedFlashOn = true;
-    } else if (isFlushing) {
-      bool continueFlushRecovery = acceptFlushCancel(button1Pressed, button2Pressed);
-      bothButtonsPressed = true;
-      feedTaskWatchdog();
-      delay(1);
-      if (!continueFlushRecovery) {
-        return;
-      }
-    } else {
-      SerialBLE_println("Both buttons pressed - stopping active operations");
-      stopEverything();
-
-      button1WasPressed = button1Pressed;
-      button2WasPressed = button2Pressed;
-      button1Held = false;
-      button1DelayActive = false;
-      button2DelayActive = false;
-      button2FeedStarted = false;
-
-      bothButtonsPressed = true;
-      dualButtonHoldActive = false;
-      batteryDisplayMode = false;
     }
   } else if (bothButtonsPressedNow && bothButtonsPressed && !otaEnabled) {
     unsigned long currentMillis = millis();
@@ -7283,11 +7559,12 @@ void loop() {
     if (flushStep == FLUSH_STEP_CANCEL_COOL) {
       // Cancel recovery cooling in progress; ignore further cancel presses.
     } else if (bothButtonsPressedNow) {
-      // Dual-button cancel handled above (bypasses flushCancelArmed).
+      // Dual-button cancel handled above once two samples confirm it.
     } else if (!flushCancelInputActive) {
       flushCancelArmed = true;
-    } else if (flushCancelArmed) {
+    } else if (flushCancelArmed && flushCancelConfirmed) {
       bool continueFlushRecovery = acceptFlushCancel(button1Pressed, button2Pressed);
+      flushCancelConfirmSamples = 0;
       feedTaskWatchdog();
       delay(1);
       if (!continueFlushRecovery) {
@@ -7335,6 +7612,12 @@ void loop() {
             playHardwareNotConnectedAlert();
             button1DisconnectAlertedForCurrentPress = true;
           }
+        } else if (digitalRead(microswitchOpenPin) != LOW) {
+          if (!button1DisconnectAlertedForCurrentPress) {
+            Serial.println("Flush blocked: mechanism not in open state");
+            SerialBLE_println("Flush blocked: mechanism not in open state");
+            button1DisconnectAlertedForCurrentPress = true;
+          }
         } else {
           if (!isFlushAllowedByBattery(true)) {
             if (batteryAdcReadFailed) {
@@ -7363,6 +7646,12 @@ void loop() {
           }
 
           cutBag = true;
+          if (usbTestButton1) {
+            // Drop the simulated hold once the flush is committed so the next
+            // loop does not treat it as a cancel.
+            usbTestButton1 = false;
+            Serial.println("BUTTON:1:0");
+          }
           SerialBLE_println("Cut Bag mode enabled!");
           Serial.printf("DEBUG: cutBag set to true, hold time: %lu ms\n", millis() - button1HoldStartTime);
           flushStartLEDAnimation();
@@ -7373,11 +7662,13 @@ void loop() {
           // Calculate sequence timing and reset LED state (countdown from full bar)
           calculateSequenceTiming();
           ledIndex = totalLeds - 1;
+          controlPanelLedShadow = ledShadowThroughIndex(ledIndex);
           clockwise = true;
           ledLastUpdateMillis = millis();
           
           flushStep = 0;
           isFlushing = true;
+          applyAuxFanOutput(true);
           logFlushEvent("flush_event", 0, "start", false);
           flushCancelArmed = false;
           button1Held = false;
@@ -7508,7 +7799,8 @@ void loop() {
 
   // Inactivity deep sleep: 5 minutes with no activity, wake on GPIO2 (controlPanelWake).
   // Only enter when wake button is released (HIGH) so pin does not trigger immediate wake.
-  // Fan pins are held at the scheduled level. A timer wake is armed only when a transition is pending.
+  // Blower is held off. Aux fan (GPIO18) is held at the scheduled level.
+  // A timer wake is armed only when a transition is pending.
   if (!devModeEnabled && !otaEnabled && !batteryDisplayMode && !isFlushing && !motorHomingActive &&
       !mechanismMotorRunning && !fanRunning && !isCharging &&
       (millis() - lastActivityMillis >= INACTIVITY_SLEEP_MS) &&
@@ -7588,6 +7880,13 @@ void loop() {
     }
   } else if (flushCancelRecoveryActive) {
     maintainCancelRecoveryLeds();
+  }
+  if (pendingIdleLedClear && !flushOwnsControlPanelLeds()) {
+    pendingIdleLedClear = false;
+    clearControlPanelLedsIfIdle();
+  }
+  if (flushOwnsControlPanelLeds()) {
+    paintControlPanelLedShadow();
   }
   
   // Stream serial data to BLE if enabled (only when BLE is active)
@@ -7672,7 +7971,6 @@ void flushSequence() {
         abortFlushPreflight(true);
         return;
       }
-      ledLastUpdateMillis = millis();
       maxHeaterWallTimeMs = 0;  // Reset at start of each flush cycle before recomputing once.
       heaterMaxWallAtFlushStart = (ERROR_CODE == 6);
       heaterMaxWallThisFlush = false;
@@ -7845,7 +8143,21 @@ void flushSequence() {
     case 5: {
       if (mechanismMotorRunning && (currentMillis - motorStartMillis > maxOpeningTimeMs()) && ERROR_CODE == 0) {
         SerialBLE_println("Mechanism close timeout in case 5");
-        if (digitalRead(microswitchClosePin) != LOW && readM1Current() > M1_STALL_CURRENT_A) {
+        const bool closeSwLow = (digitalRead(microswitchClosePin) == LOW);
+        const float m1A = readM1Current();
+        const char* cause = "switch_closed_high_current";
+        if (!closeSwLow && m1A > M1_STALL_CURRENT_A) {
+          cause = "jam_stall";
+        } else if (!closeSwLow) {
+          cause = "switch_open_no_stall";
+        } else if (m1A <= M1_STALL_CURRENT_A) {
+          cause = "switch_closed_low_current";
+        }
+        char msg[96];
+        snprintf(msg, sizeof(msg), "case5_timeout close_sw=%d m1A=%.2f cause=%s",
+                 closeSwLow ? 1 : 0, m1A, cause);
+        logError("runtime", 1, msg, false);
+        if (!closeSwLow && m1A > M1_STALL_CURRENT_A) {
           startM1JamReverse(400);
           return;
         }
@@ -8779,6 +9091,9 @@ void restartBLEServer() {
 }
 
 float readTemperature() {
+  if (testModeEnabled && usbTempOverride) {
+    return usbTempC;
+  }
   int analogValue = analogRead(thermistorPin);
   //SerialBLE_print("analog temperature value:");
   //SerialBLE_println(analogValue);
@@ -8807,13 +9122,43 @@ float readMainThermistorResistanceOhms() {
 }
 
 bool isHardwareLikelyDisconnectedForUserAction() {
+  if (testModeEnabled && usbThermOpen) {
+    return true;
+  }
   return readMainThermistorResistanceOhms() > HARDWARE_DISCONNECT_RESISTANCE_OHMS;
 }
 
-void maintainCancelRecoveryLeds() {
-  for (int i = 0; i < totalLeds; i++) {
-    mcp_digitalWrite(getLedPin(i), HIGH);
+uint16_t ledShadowThroughIndex(int highestOnIndex) {
+  uint16_t mask = 0;
+  if (highestOnIndex < 0) {
+    return 0;
   }
+  int last = highestOnIndex;
+  if (last >= totalLeds) {
+    last = totalLeds - 1;
+  }
+  for (int i = 0; i <= last; i++) {
+    int pin = getLedPin(i);
+    if (pin >= 0 && pin < 16) {
+      mask |= (uint16_t)1u << pin;
+    }
+  }
+  return mask;
+}
+
+uint16_t ledShadowAllOn() {
+  return ledShadowThroughIndex(totalLeds - 1);
+}
+
+void paintControlPanelLedShadow() {
+  if (!mcpInitialized) {
+    return;
+  }
+  mcp.writeGPIOAB(controlPanelLedShadow);
+}
+
+void maintainCancelRecoveryLeds() {
+  controlPanelLedShadow = ledShadowAllOn();
 }
 
 void playHardwareNotConnectedAlert() {
@@ -10319,53 +10664,84 @@ float readBatteryVoltage() {
   return sample.valid ? sample.voltage : NAN;
 }
 
+bool sampleBatteryTemperature(BatteryTempSample* out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  int adcSum = 0;
+  for (int i = 0; i < kBatteryTempAdcSamples; i++) {
+    adcSum += analogRead(batteryTempPin);
+  }
+  int adc = adcSum / kBatteryTempAdcSamples;
+  float voltage = adc * (3.3f / 4095.0f);
+
+  out->adc = adc;
+  out->voltage = voltage;
+  out->resistanceOhms = 0.0f;
+  out->tempC = NAN;
+  out->valid = false;
+  out->error = "RANGE";
+
+  // Near the rails the divider is open or shorted. Do not divide by ~0.
+  if (voltage <= 0.02f) {
+    out->error = "OPEN";
+    return false;
+  }
+  if (voltage >= 3.28f) {
+    out->error = "SHORT";
+    return false;
+  }
+
+  // 3.3V -> NTC -> GPIO5 -> kBatteryTempFixedOhms -> GND
+  float resistance = kBatteryTempFixedOhms * (3.3f - voltage) / voltage;
+  out->resistanceOhms = resistance;
+
+  float tempC = NAN;
+  if (!batteryTempCFromKohm(resistance / 1000.0f, &tempC)) {
+    out->tempC = tempC;
+    out->error = "RANGE";
+    return false;
+  }
+  out->tempC = tempC;
+  out->valid = true;
+  out->error = nullptr;
+  return true;
+}
+
 float readBatteryTemperatureQuiet() {
-  int analogValue = analogRead(batteryTempPin);
-  float voltage = analogValue * (3.3f / 4095.0f);
-  float thermistorResistance = 10000.0f * (3.3f - voltage) / voltage;
-  float ln_ratio = log(thermistorResistance / 10000.0f);
-  float steinhart = ln_ratio / 3950.0f + 1.0f / (25.0f + 273.15f);
-  return (1.0f / steinhart) - 273.15f;
+  BatteryTempSample sample;
+  if (!sampleBatteryTemperature(&sample) || !sample.valid) {
+    return NAN;
+  }
+  return sample.tempC;
 }
 
 float readBatteryTemperature() {
-  int analogValue = analogRead(batteryTempPin);
-  
-  // Step 1: Convert ADC reading to voltage (0-3.3V)
-  float voltage = analogValue * (3.3 / 4095.0);
-  
-  // Step 2: Calculate thermistor resistance using voltage divider formula
-  // Voltage divider: 3.3V -> 10kΩ pull-up -> NTC thermistor -> GND
-  // Formula: R_thermistor = R_pullup * (V_supply - V_measured) / V_measured
-  float thermistorResistance = 10000.0 * (3.3 - voltage) / voltage;
-  
-  // Step 3: Steinhart-Hart equation for NTC thermistor temperature calculation
-  // Using typical 10kΩ NTC thermistor coefficients (B25/85 = 3950K)
-  // Formula: 1/T = 1/B * ln(R/R0) + 1/T0
-  // Where: B = 3950K, R0 = 10000Ω, T0 = 25°C = 298.15K
-  float ln_ratio = log(thermistorResistance / 10000.0);
-  float steinhart = ln_ratio / 3950.0 + 1.0 / (25.0 + 273.15);
-  float temperature = (1.0 / steinhart) - 273.15;
-  
-  // Detailed debug output to Serial
+  BatteryTempSample sample;
+  sampleBatteryTemperature(&sample);
+
   Serial.println("=== BATTERY TEMPERATURE CALCULATION DEBUG ===");
-  Serial.printf("Step 1 - ADC Reading: %d (0-4095)\n", analogValue);
-  Serial.printf("Step 2 - Voltage: %.3fV (ADC * 3.3/4095)\n", voltage);
-  Serial.printf("Step 3 - Thermistor Resistance: %.0fΩ\n", thermistorResistance);
-  Serial.printf("Step 4 - ln(R/R0): %.4f\n", ln_ratio);
-  Serial.printf("Step 5 - Steinhart: %.6f\n", steinhart);
-  Serial.printf("Step 6 - Temperature: %.1f°C\n", temperature);
+  Serial.printf("ADC Reading: %d (0-4095, mean of %d)\n", sample.adc, kBatteryTempAdcSamples);
+  Serial.printf("Voltage: %.3fV\n", sample.voltage);
+  Serial.printf("Thermistor Resistance: %.0f ohm (fixed leg %.0f ohm)\n",
+                sample.resistanceOhms, kBatteryTempFixedOhms);
+  if (sample.valid) {
+    Serial.printf("Temperature: %.1f C\n", sample.tempC);
+  } else {
+    Serial.printf("Temperature invalid: %s\n", sample.error ? sample.error : "RANGE");
+  }
   Serial.println("=============================================");
 
-  // Include motor fault health in battery temp debug so it can be monitored
-  // without running a full flush sequence.
   String faultSnapshot = buildMotorFaultStatusSnapshot();
-  
-  // Debug output to Bluetooth: one string to avoid truncation/interleaving
   if (serial_streaming_enabled) {
-    sendSerialToBLE("=== BATTERY TEMP DEBUG ===\nADC: " + String(analogValue) + ", Voltage: " + String(voltage, 2) + "V, Resistance: " + String(thermistorResistance, 2) + " Ohm, Temp: " + String(temperature, 2) + " C, " + faultSnapshot + "\n");
+    sendSerialToBLE("=== BATTERY TEMP DEBUG ===\nADC: " + String(sample.adc) +
+                    ", Voltage: " + String(sample.voltage, 2) +
+                    "V, Resistance: " + String(sample.resistanceOhms, 0) +
+                    " Ohm, Temp: " + String(sample.valid ? sample.tempC : NAN, 2) +
+                    " C, " + faultSnapshot + "\n");
   }
-  return temperature;
+  return sample.valid ? sample.tempC : NAN;
 }
 
 int getBatteryChargeLevel() {
@@ -10494,18 +10870,14 @@ void updateFlushCompleteLedCue(unsigned long elapsedMs) {
 
   if (phase < totalLeds) {
     // Bottom→top cumulative on.
-    for (int i = 0; i < totalLeds; i++) {
-      mcp_digitalWrite(getLedPin(i), i <= phase ? HIGH : LOW);
-    }
+    controlPanelLedShadow = ledShadowThroughIndex(phase);
     return;
   }
 
   phase -= totalLeds;
   if (phase < totalLeds) {
     // Bottom→top cumulative off.
-    for (int i = 0; i < totalLeds; i++) {
-      mcp_digitalWrite(getLedPin(i), i <= phase ? LOW : HIGH);
-    }
+    controlPanelLedShadow = ledShadowAllOn() & ~ledShadowThroughIndex(phase);
   }
 }
 
@@ -10521,17 +10893,8 @@ void clearControlPanelLedsIfIdle() {
   if (flushOwnsControlPanelLeds()) {
     return;
   }
-  for (int i = 0; i < totalLeds; i++) {
-    mcp_digitalWrite(getLedPin(i), LOW);
-  }
-}
-
-bool isDeviceIdleForDualButton() {
-  return !isFlushing
-      && !motorHomingActive
-      && !manualFeedActive
-      && !mechanismMotorRunning
-      && !m1JamReverseActive;
+  controlPanelLedShadow = 0;
+  paintControlPanelLedShadow();
 }
 
 bool acceptFlushCancel(bool button1Pressed, bool button2Pressed) {
@@ -10755,11 +11118,9 @@ void applyLedDrainToIndex(int targetHighestOnIndex, bool forceImmediate = false)
   if (targetHighestOnIndex < ledIndex) {
     ledIndex = targetHighestOnIndex;
   }
-  (void)forceImmediate;  // Section snaps still drain via ledIndex; ticks always refresh ON+OFF.
+  (void)forceImmediate;  // Section snaps still drain via ledIndex; loop repaints the shadow.
 
-  for (int i = 0; i < totalLeds; i++) {
-    mcp_digitalWrite(getLedPin(i), i <= ledIndex ? HIGH : LOW);
-  }
+  controlPanelLedShadow = ledShadowThroughIndex(ledIndex);
   ledLastUpdateMillis = millis();
 }
 
@@ -11322,14 +11683,22 @@ bool fanDutyScheduleOwnsOutput() {
   return !isFlushing && !otaEnabled && !fanRunning && !button2FeedStarted;
 }
 
+void applyAuxFanOutput(bool on) {
+  int level = on ? HIGH : LOW;
+  if (lastAuxFanLevel == level) {
+    return;
+  }
+  pinMode(auxFanPin, OUTPUT);
+  digitalWrite(auxFanPin, level);
+  lastAuxFanLevel = level;
+  Serial.printf("Aux fan GPIO%d %s\n", auxFanPin, on ? "ON" : "OFF");
+}
+
 void applyScheduledFanOutput() {
   if (!fanDutyScheduleOwnsOutput()) {
     return;
   }
-  int desiredState = rtcFanOutputOn ? 1 : 0;
-  if (lastFanState != desiredState) {
-    setFanSpeed(rtcFanOutputOn ? 400 : 0);
-  }
+  applyAuxFanOutput(rtcFanOutputOn != 0);
 }
 
 void advanceFanDutyPhase() {
@@ -11510,24 +11879,31 @@ String buildFanDutyStatusMessage() {
   return String("FAN_DUTY:") + String(rtcFanDutyPercent);
 }
 
-void holdFanPinsForDeepSleep(bool fanOn, bool detachLedc) {
+void holdFanPinsForDeepSleep(bool auxOn, bool detachLedc) {
   if (detachLedc) {
+    setFanSpeed(0);
     ledcDetach(sealerFanPWM);
   }
   pinMode(sealerFanPwr, OUTPUT);
   pinMode(sealerFanReverse, OUTPUT);
   pinMode(sealerFanPWM, OUTPUT);
-  int level = fanOn ? 1 : 0;
-  digitalWrite(sealerFanPwr, level);
+  pinMode(auxFanPin, OUTPUT);
+  digitalWrite(sealerFanPwr, LOW);
   digitalWrite(sealerFanReverse, LOW);
-  digitalWrite(sealerFanPWM, level);
-  gpio_set_level((gpio_num_t)sealerFanPwr, level);
+  digitalWrite(sealerFanPWM, LOW);
+  int auxLevel = auxOn ? 1 : 0;
+  digitalWrite(auxFanPin, auxLevel);
+  gpio_set_level((gpio_num_t)sealerFanPwr, 0);
   gpio_set_level((gpio_num_t)sealerFanReverse, 0);
-  gpio_set_level((gpio_num_t)sealerFanPWM, level);
+  gpio_set_level((gpio_num_t)sealerFanPWM, 0);
+  gpio_set_level((gpio_num_t)auxFanPin, auxLevel);
   gpio_hold_en((gpio_num_t)sealerFanPwr);
   gpio_hold_en((gpio_num_t)sealerFanReverse);
   gpio_hold_en((gpio_num_t)sealerFanPWM);
+  gpio_hold_en((gpio_num_t)auxFanPin);
   gpio_deep_sleep_hold_en();
+  lastAuxFanLevel = auxLevel ? HIGH : LOW;
+  lastFanState = 0;
 }
 
 void prepareFanPinsForDeepSleep() {
@@ -11583,6 +11959,7 @@ void releaseFanPinsFromDeepSleepHold() {
   gpio_hold_dis((gpio_num_t)sealerFanPwr);
   gpio_hold_dis((gpio_num_t)sealerFanReverse);
   gpio_hold_dis((gpio_num_t)sealerFanPWM);
+  gpio_hold_dis((gpio_num_t)auxFanPin);
 }
 
 void setFanSpeed(int speed) {

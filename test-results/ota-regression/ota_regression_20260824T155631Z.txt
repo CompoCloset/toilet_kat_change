@@ -1,0 +1,102 @@
+OTA Partition Regression Report
+Run ID: 20260824T155631Z
+Started: 2026-08-24T15:56:31.211023+00:00
+Ended: 2026-08-24T17:32:11.241490+00:00
+Result: FAIL
+Dry run: False
+Fast mode: False
+Auto-build: False
+Port: COM11
+BLE address: A4:CB:8F:DD:1A:A9
+
+Partition sequence: ota_1 -> ota_0 -> ota_1 -> ota_0 -> ota_0
+Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+
+Version evolution:
+Step                 Partition  Expected SW              Observed SW              Pass
+------------------------------------------------------------------------------------------
+flash_factory        factory    unknown                  3.0.0                    FAIL
+ota1                 ota_0      4.2.8-regA               -                        FAIL
+ota2                 ota_1      4.2.8-regB               4.2.8-regB               PASS
+rollback_previous    ota_0      4.2.8-regA               4.2.8-regA               PASS
+ota3                 ota_1      4.2.8-regB               4.2.8-regB               PASS
+ota4                 ota_0      4.2.8-regA               4.2.8-regA               PASS
+factory_reset        factory    unknown                  3.0.0                    FAIL
+ota5                 ota_0      4.2.8-regB               4.2.8-regB               PASS
+
+Failures:
+  - flash_factory: Expected Build 2026-03-13, observed 'Mar 13 202'
+  - ota1: OTA pending verification did not clear within 180s; last diag={}
+  - factory_reset: Expected Build 2026-03-13, observed 'Mar 13 202'
+  - Partition sequence mismatch: expected ['factory', 'ota_0', 'ota_1', 'ota_0', 'ota_1', 'ota_0', 'factory', 'ota_0'], observed ['ota_1', 'ota_0', 'ota_1', 'ota_0', 'ota_0']
+
+[FAIL] flash_factory (17.01s)
+  transport: serial
+  expected partition: factory
+  observed partition: factory
+  expected SW: unknown
+  observed SW: 3.0.0
+  version: HW:Uninitialized|SW:3.0.0|Build:Mar 13 202
+  error: Expected Build 2026-03-13, observed 'Mar 13 202'
+
+[FAIL] ota1 (188.81s)
+  transport: ble
+  pending_clear_required: yes
+  expected partition: ota_0
+  observed partition: None
+  expected SW: 4.2.8-regA
+  observed SW: None
+  error: OTA pending verification did not clear within 180s; last diag={}
+
+[PASS] ota2 (60.2s)
+  transport: ble
+  pending_clear_required: yes
+  expected partition: ota_1
+  observed partition: ota_1
+  expected SW: 4.2.8-regB
+  observed SW: 4.2.8-regB
+  version: HW:Uninitialized|SW:4.2.8-regB|Build:2026-08-24
+
+[PASS] rollback_previous (24.15s)
+  transport: ble
+  expected partition: ota_0
+  observed partition: ota_0
+  expected SW: 4.2.8-regA
+  observed SW: 4.2.8-regA
+  version: HW:Uninitialized|SW:4.2.8-regA|Build:2026-08-24
+
+[PASS] ota3 (64.59s)
+  transport: ble
+  pending_clear_required: yes
+  expected partition: ota_1
+  observed partition: ota_1
+  expected SW: 4.2.8-regB
+  observed SW: 4.2.8-regB
+  version: HW:Uninitialized|SW:4.2.8-regB|Build:2026-08-24
+
+[PASS] ota4 (66.01s)
+  transport: ble
+  pending_clear_required: yes
+  expected partition: ota_0
+  observed partition: ota_0
+  expected SW: 4.2.8-regA
+  observed SW: 4.2.8-regA
+  version: HW:Uninitialized|SW:4.2.8-regA|Build:2026-08-24
+
+[FAIL] factory_reset (17.87s)
+  transport: ble
+  expected partition: factory
+  observed partition: factory
+  expected SW: unknown
+  observed SW: 3.0.0
+  version: HW:Uninitialized|SW:3.0.0|Build:Mar 13 202
+  error: Expected Build 2026-03-13, observed 'Mar 13 202'
+
+[PASS] ota5 (34.3s)
+  transport: ble
+  pending_clear_required: yes
+  expected partition: ota_0
+  observed partition: ota_0
+  expected SW: 4.2.8-regB
+  observed SW: 4.2.8-regB
+  version: HW:Uninitialized|SW:4.2.8-regB|Build:2026-08-24

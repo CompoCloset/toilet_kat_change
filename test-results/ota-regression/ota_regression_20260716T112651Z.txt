@@ -1,0 +1,16 @@
+OTA Partition Regression Report
+Run ID: 20260716T112651Z
+Started: 2026-07-16T11:26:51.066092+00:00
+Ended: 2026-07-16T11:26:51.410480+00:00
+Result: FAIL
+Dry run: False
+Fast mode: False
+Auto-build: True
+Port: COM7
+BLE address: 3C:DC:75:FC:62:5C
+
+Partition sequence: 
+Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+
+Failures:
+  - preflight: Serial port preflight failed for COM7: esptool read-flash failed (exit 2). If COM6 is busy, close Serial Monitor, the BLE Python tool, or any app using the port.

@@ -244,13 +244,13 @@ During the post-cooling open phase, firmware uses `openSwitchLatched` to record 
 
 A trap mid-travel used to leave M1 stopped at the jam (close timeout or open timeout). Firmware now backs M1 up for 2 s opposite the last move, then aborts with ERROR_CODE 1. Successful close clamp and successful open endstop are unchanged.
 
-**Close (flush case 5, homing partial-close):** stall at the sealed endstop is expected (`close switch LOW` + current `> 0.5 A`). Firmware does **not** reverse early on current. At `maxOpeningTime`, if the close switch is still HIGH **and** current is above `0.5 A`, treat as a jam: reverse open (`setM1Speed(-400)`) for `M1_JAM_REVERSE_MS` (2 s), then abort. Timeout with no stall current keeps the previous stop-in-place ERROR 1. Case 6 cut/strain pulses are excluded (intentional stall already closed).
+**Close (flush case 5, homing partial-close):** stall at the sealed endstop is expected (`close switch LOW` + current `> 0.5 A`). Firmware does **not** reverse early on current. At `maxOpeningTime`, if the close switch is still HIGH **and** current is above `0.5 A`, treat as a jam: reverse open (`setM1Speed(-400)`) for `M1_JAM_REVERSE_MS` (2 s), then abort. Timeout with no stall current keeps the previous stop-in-place ERROR 1. On that case 5 timeout, before jam reverse or the stop-in-place ERROR 1, firmware writes one SPIFFS `logError` line: `case5_timeout close_sw=<0|1> m1A=<amps> cause=<jam_stall|switch_open_no_stall|switch_closed_low_current|switch_closed_high_current>`. `close_sw` is 1 when the close pin reads LOW. `LEDErrorCode` still also logs `motor_timeout` on the ERROR 1 path. Case 6 cut/strain pulses are excluded (intentional stall already closed).
 
 **Open (flush cases 8/10 while M1 is still running, homing open-full):** opening should not stall. If current stays above `0.5 A` while the open switch is still HIGH, reverse close (`setM1Speed(400)`) for 2 s **immediately**, then abort. Ignore the first `300 ms` after open starts (inrush) and require `150 ms` of high current before firing. If current never spikes, the existing `maxOpeningTime` timeout still stops in place.
 
 **Reverse completion:** stop M1, `ERROR_CODE = 1`, `stopEverything()`, LED error. No auto-retry. If the opposite endstop hits during reverse, stop M1 early instead of driving into the stop.
 
-**Control panel must not cancel jam reverse.** The reverse is the motion that backs the mechanism off a jam so a trapped limb or object can be pulled free. Someone who is trapped is likely to press the control panel. If that press stops M1, the backup that would release them is cut short. While `m1JamReverseActive` is set, control-panel input (flush, feed, dual-button, wake line) does not call `stopEverything()`, `stopFlushActiveOperations()`, or `clearFlushStateForCancel()` in a way that clears the reverse or zeros M1. The reverse still ends on its own: opposite endstop, or `M1_JAM_REVERSE_MS` (2 s), then ERROR_CODE 1. Fault paths (over-temp, motor fault, low-battery latch) may still call `stopEverything()` and clear the reverse; those are not a user trying to free a limb.
+**Control panel:** a button press during a flush still cancels the flush (`acceptFlushCancel()`), which stops the cycle, including an in-progress jam reverse. A dual-press that is only a battery read does not call `stopEverything()`, so homing, manual feed, and jam reverse keep running. Fault paths (over-temp, motor fault, low-battery latch) may still call `stopEverything()`.
 
 ## Flush cancel recovery
 
@@ -286,9 +286,9 @@ During an active flush, the user can cancel via control panel input (button 1, b
 
 **Guards**:
 
-- New flush start remains blocked while `isFlushing` (including case 14) or `motorHomingActive`.
+- New flush start remains blocked while `isFlushing` (including case 14) or `motorHomingActive`, while homing is deferred, and unless the mechanism is fully open (`microswitchOpenPin` LOW). If the user holds flush and the mechanism is not open, firmware logs once per press `Flush blocked: mechanism not in open state` and does not set `isFlushing`.
 - Dual-button press during flush uses `acceptFlushCancel()` (same recovery as single-button cancel), not `stopEverything()`.
-- Dual-button press while busy but not flushing (manual feed, homing, etc.) uses `stopEverything()` as a hard stop, except while `motorHomingActive` or `m1JamReverseActive`. Homing is left running so a battery read cannot mark the mechanism as located. Jam reverse is left running so a control-panel press cannot stop the backup that frees a trapped limb (see M1 jam reverse).
+- Dual-button press when not flushing displays the battery level and does not call `stopEverything()`. Homing, manual feed, and jam reverse keep running.
 - Fault paths and OTA enable still use `stopEverything()`, which clears `cancelRecoveryHomingPending`.
 - Normal flush post-open tail (cases 8–13) is never entered on cancel recovery.
 
@@ -440,31 +440,35 @@ The BLE trust handshake requires a physical button press near the device before 
 
 ## Flush owns control-panel LEDs until complete, cancel, or abort
 
-Flush progress is the only LED owner while `isFlushing` or `flushCancelRecoveryActive`. Idle writers (BLE trust connect/disconnect/`TRUST_CANCEL`/timeout/confirm, OTA/trust `slowCircleLeds()`, battery-display exit) must not blank the panel during that window. Trust **flags** still reset on connect/disconnect; only the MCP LED writes are skipped.
+Flush progress is the only LED owner while `isFlushing` or `flushCancelRecoveryActive`. Idle writers (trust timeout/confirm, OTA/trust `slowCircleLeds()`, battery-display exit) must not blank the panel during that window. Trust **flags** still reset on connect/disconnect; the matching LED clear waits until `loop()` and only runs when the flush does not own the panel.
 
-Each 90 ms progress tick rewrites the remaining bar (HIGH for UI indexes `0..ledIndex`, LOW above). Drain stays monotonic. That recovers from I2C glitches and from any stray wipe (for example a hardware-disconnect alert that flashes then leaves LEDs off without cancelling). Blocking error flashes (`LEDErrorCode`) still take over after `stopEverything()` clears flush ownership.
+Each 90 ms progress tick advances the remaining bar (HIGH for UI indexes `0..ledIndex`, LOW above). Drain stays monotonic. The loop repaints that pattern, the completion cue, and cancel-recovery all-on from a shadow with one `writeGPIOAB` every pass, so a failed per-pin read-modify-write cannot leave the panel dark. Blocking error flashes (`LEDErrorCode`) still take over after `stopEverything()` clears flush ownership.
+
+A failed MCP23017 transaction is not a button press. Expander samples count as released unless the GPIOAB read completes. Flush cancel needs two consecutive loop samples that read pressed (`noteFlushCancelSample()`), so one failed or released sample clears the streak and cannot call `acceptFlushCancel()`. Silk 2.0 flush is GPIO2, not the expander; only the MCP-backed buttons use the failed-read rule. This path does not look at the BLE connection.
+
+BLE connect, disconnect, and `TRUST_CANCEL` do not read the MCP, cancel the flush, or call `stopEverything()`. They only set `pendingIdleLedClear`. `loop()` applies that clear when the flush does not own the panel. Re-advertising after disconnect does not `delay(500)` while a flush owns the panel.
 
 ## Hardware DEV mode toggle via dual-button hold
 
-Holding both control panel buttons for 10 seconds while **DEV mode is off** enables persisted DEV mode via `setDevModeEnabled(true)`. A short simultaneous dual press behaves differently depending on whether the device is idle.
+Holding both control panel buttons for 10 seconds while **DEV mode is off** enables persisted DEV mode via `setDevModeEnabled(true)`. A short simultaneous dual press shows the battery unless a flush is running, in which case it cancels the flush.
 
-When **DEV mode is on**, the same dual-button hold gesture does **not** turn DEV mode off at 10 seconds. Instead, at 10 seconds the device gives warning feedback (double beep + brief LED flash). If both buttons remain held for **20 seconds total** from the idle battery path, the device performs a **factory firmware rollback** (same outcome as BLE `OTA_ROLLBACK_FACTORY`). Turn DEV mode off via BLE `SET_DEV_MODE:0` or the app.
+When **DEV mode is on**, the same dual-button hold gesture does **not** turn DEV mode off at 10 seconds. Instead, at 10 seconds the device gives warning feedback (double beep + brief LED flash). If both buttons remain held for **20 seconds total** from a battery-read dual press, the device performs a **factory firmware rollback** (same outcome as BLE `OTA_ROLLBACK_FACTORY`). Turn DEV mode off via BLE `SET_DEV_MODE:0` or the app.
 
 **Behavior**:
 
-- **Idle** (`isDeviceIdleForDualButton()`): short dual press stops any stray state via `stopEverything()`, shows battery level on the LEDs, and starts the dual-button hold timer. LEDs auto-clear a few seconds after release.
-- **Not idle** (flushing, homing, manual feed, mechanism/fan motion): short dual press does **not** show battery. If flushing, runs flush cancel recovery via `acceptFlushCancel()`. Otherwise calls `stopEverything()` as a hard stop.
-- **DEV off**, 10-second continuous dual hold: enable DEV mode (persisted in NVS); only from the idle battery path (`dualButtonHoldActive`); blocked while an OTA window is active.
+- **Not flushing**: short dual press shows battery level on the LEDs and starts the dual-button hold timer. It does not call `stopEverything()`. Homing, manual feed, and jam reverse keep running. LEDs auto-clear a few seconds after release.
+- **Flushing**: short dual press runs flush cancel recovery via `acceptFlushCancel()`, not `stopEverything()`.
+- **DEV off**, 10-second continuous dual hold: enable DEV mode (persisted in NVS); from the battery-read path (`dualButtonHoldActive`); blocked while an OTA window is active or a flush is running.
 - **DEV on**, 10-second hold: warning only (no DEV toggle off).
-- **DEV on**, 20-second continuous dual hold: factory partition rollback and reboot; same idle/OTA guards as the DEV-on path above.
+- **DEV on**, 20-second continuous dual hold: factory partition rollback and reboot; same battery-read and OTA guards as the DEV-on path above.
 - OTA firmware updates are app-only: send `ENABLE_OTA` over BLE; there is no hardware path to OTA mode.
 
 **Rationale**:
 
 - OTA entry via a hidden button sequence is redundant now that the app handles firmware updates.
 - A hardware DEV mode toggle remains useful for field debugging (inactivity deep sleep disabled) without requiring the app.
-- Factory rollback via hardware is deliberately hard to trigger (DEV on + 20 s hold while idle) to avoid accidental customer rollbacks.
-- Battery display is only meaningful when idle; during active operations dual press should cancel or stop, not show battery level.
+- Factory rollback via hardware is deliberately hard to trigger (DEV on + 20 s hold on a battery-read dual press, and not during a flush) to avoid accidental customer rollbacks.
+- A battery-read dual press must not call `stopEverything()`. That call cleared `motorHomingActive` without the mechanism being open, and the next flush hold was then allowed to start. During a flush, dual press still cancels the flush.
 - Dual-button flush cancel predates single-button cancel and must work on first simultaneous press without the `flushCancelArmed` release-then-press debounce.
 
 ## BLE payload chunking in the Python client

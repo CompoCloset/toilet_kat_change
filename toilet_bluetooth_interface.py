@@ -48,7 +48,7 @@ FRAME_HEADER_SIZE = 3
 MAX_FRAME_PAYLOAD = 0xFFFF
 # Stale fea4 payloads left by prior command-channel traffic (e.g. TRUST_STATUS after handshake).
 _STALE_PARAM_WRITE_RESPONSE_RE = re.compile(
-    r"^(FLUSH_COUNT|BATTERY|TRUST_|DEV_MODE|LOGS:|HW_|HWCFG_|SET_DEV_MODE_|RESET_BATTERY_CAL|TASK_WDT:|DISABLE_TASK_WDT|ENABLE_TASK_WDT|UNKNOWN_COMMAND:|READY)"
+    r"^(FLUSH_COUNT|BATTERY|BATT_TEMP|TRUST_|DEV_MODE|LOGS:|HW_|HWCFG_|SET_DEV_MODE_|RESET_BATTERY_CAL|TASK_WDT:|DISABLE_TASK_WDT|ENABLE_TASK_WDT|UNKNOWN_COMMAND:|READY)"
 )
 
 
@@ -1060,6 +1060,35 @@ class ToiletSystemInterface:
             return None
         return level
 
+    async def get_battery_temperature(self) -> Optional[dict]:
+        """Read pack NTC temperature.
+
+        Command: GET_BATTERY_TEMP
+        Success: BATT_TEMP:<celsius>C,ADC=<counts>,R=<ohms>
+        Error:   BATT_TEMP_ERR:OPEN|SHORT|RANGE,...
+
+        Returns a dict with temp_c, adc, and resistance_ohms, or None.
+        """
+        response = await self._send_command_and_read_response("GET_BATTERY_TEMP")
+        if not response:
+            print("No response from firmware for GET_BATTERY_TEMP")
+            return None
+        if response.startswith("BATT_TEMP_ERR:"):
+            print(f"Firmware battery temperature error: {response}")
+            return None
+        match = re.match(
+            r"^BATT_TEMP:([+-]?\d+(?:\.\d+)?)C,ADC=(\d+),R=(\d+(?:\.\d+)?)$",
+            response,
+        )
+        if not match:
+            print(f"Unexpected GET_BATTERY_TEMP response: {response}")
+            return None
+        return {
+            "temp_c": float(match.group(1)),
+            "adc": int(match.group(2)),
+            "resistance_ohms": float(match.group(3)),
+        }
+
     async def get_battery_debug(self) -> Optional[str]:
         """Read BATTERY_DEBUG calibration/sample line for support diagnostics."""
         response = await self._send_command_and_read_response("GET_BATTERY_DEBUG")
@@ -1740,8 +1769,9 @@ async def main():
             print("29. Read battery level (GET_BATTERY)")
             print("30. Read battery calibration debug (GET_BATTERY_DEBUG)")
             print("31. Reset battery calibration to seed (RESET_BATTERY_CAL)")
+            print("32. Read battery temperature (GET_BATTERY_TEMP)")
             
-            choice = input("\nEnter your choice (1-31): ").strip()
+            choice = input("\nEnter your choice (1-32): ").strip()
             
             if choice == "1":
                 print("\nReading current parameters...")
@@ -2245,8 +2275,19 @@ async def main():
                     if debug:
                         print(f"Current calibration: {debug}")
 
+            elif choice == "32":
+                print("\nReading battery temperature...")
+                sample = await interface.get_battery_temperature()
+                if sample is None:
+                    print("Failed to read battery temperature")
+                else:
+                    print(
+                        f"Battery temperature: {sample['temp_c']:.1f} C "
+                        f"(ADC {sample['adc']}, {sample['resistance_ohms']:.0f} ohm)"
+                    )
+
             else:
-                print("Invalid choice. Please enter 1-31.")
+                print("Invalid choice. Please enter 1-32.")
     
     except KeyboardInterrupt:
         print("\nProgram interrupted by user")

@@ -1,0 +1,58 @@
+OTA Partition Regression Report
+Run ID: 20260716T131912Z
+Started: 2026-07-16T13:19:12.220737+00:00
+Ended: 2026-07-16T13:21:42.660925+00:00
+Result: FAIL
+Dry run: False
+Fast mode: True
+Auto-build: False
+Port: COM7
+BLE address: 3C:DC:75:FC:62:5D
+
+Partition sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> ota_0
+Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+
+Version evolution:
+Step                 Partition  Expected SW              Observed SW              Pass
+------------------------------------------------------------------------------------------
+ota3                 ota_1      4.2.6-regB               4.2.6-regB               PASS
+ota4                 ota_0      4.2.6-regA               4.2.6-regA               PASS
+factory_reset        factory    unknown                  3.0.0                    FAIL
+ota5                 ota_0      4.2.6-regB               4.2.6-regB               PASS
+
+Failures:
+  - factory_reset: Expected Build 2026-03-13, observed '2026-07-16'
+  - Partition sequence mismatch: expected ['factory', 'ota_0', 'ota_1', 'ota_0', 'ota_1', 'ota_0', 'factory', 'ota_0'], observed ['factory', 'ota_0', 'ota_1', 'ota_0', 'ota_1', 'ota_0', 'ota_0']
+
+[PASS] ota3 (17.85s)
+  transport: serial_sim
+  expected partition: ota_1
+  observed partition: ota_1
+  expected SW: 4.2.6-regB
+  observed SW: 4.2.6-regB
+  version: HW:Uninitialized|SW:4.2.6-regB|Build:2026-07-16
+
+[PASS] ota4 (17.27s)
+  transport: serial_sim
+  expected partition: ota_0
+  observed partition: ota_0
+  expected SW: 4.2.6-regA
+  observed SW: 4.2.6-regA
+  version: HW:Uninitialized|SW:4.2.6-regA|Build:2026-07-16
+
+[FAIL] factory_reset (17.23s)
+  transport: serial_sim
+  expected partition: factory
+  observed partition: factory
+  expected SW: unknown
+  observed SW: 3.0.0
+  version: HW:Uninitialized|SW:3.0.0|Build:2026-07-16
+  error: Expected Build 2026-03-13, observed '2026-07-16'
+
+[PASS] ota5 (17.24s)
+  transport: serial_sim
+  expected partition: ota_0
+  observed partition: ota_0
+  expected SW: 4.2.6-regB
+  observed SW: 4.2.6-regB
+  version: HW:Uninitialized|SW:4.2.6-regB|Build:2026-07-16
