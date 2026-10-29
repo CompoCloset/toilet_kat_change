@@ -320,12 +320,12 @@ struct HWCFGConfigStore {
 #    include "software_version_build.h"
 #  else
 const char* SOFTWARE_VERSION_NUMBER = "4.2.8";
-const char* FACTORY_SOFTWARE_DATE = "2026-06-18";
+const char* FACTORY_SOFTWARE_DATE = "2026-10-27";
 const char* SOFTWARE_BUILD_DATE = "2026-08-24";  // YYYY-MM-DD — update with each build
 #  endif
 #else
 const char* SOFTWARE_VERSION_NUMBER = "4.2.8";
-const char* FACTORY_SOFTWARE_DATE = "2026-06-18";
+const char* FACTORY_SOFTWARE_DATE = "2026-10-27";
 const char* SOFTWARE_BUILD_DATE = "2026-08-24";  // YYYY-MM-DD — update with each build
 #endif
 

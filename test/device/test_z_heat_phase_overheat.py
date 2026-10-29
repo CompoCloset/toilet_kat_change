@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from test.device.bench import clear_and_disable, enable_test_mode, start_flush, wait_for_line
+from test.device.bench import (
+    clear_and_disable,
+    enable_test_mode,
+    expect_get_errors,
+    start_flush,
+    wait_for_line,
+)
 from test.device.fast_cycle import OVERHEAT_C
 
 pytestmark = pytest.mark.hardware
@@ -21,6 +27,7 @@ def test_injected_temp_above_target_trips_error_3(device) -> None:
             reply = await session.serial_command(f"TEMP:{OVERHEAT_C}")
             assert reply.startswith("TEMP:"), reply
             await wait_for_line(session, mark, "Heater Too Hot - stopping", 15.0)
+            await expect_get_errors(session, "ERRORS:3:heater_overheat")
         finally:
             await clear_and_disable(session)
 

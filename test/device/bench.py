@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 FAULT_REPLY_TIMEOUT_S = 20.0
 FLUSH_START_TIMEOUT_S = 8.0
 
@@ -41,6 +44,18 @@ async def start_flush(session):
         raise AssertionError("timed out waiting for the flush to start") from exc
     assert "Starting flush sequence with cut bag enabled" in started, started
     return mark
+
+
+async def expect_get_errors(session, expected: str, timeout_s: float = 3.0) -> str:
+    """Poll GET_ERRORS until fea4 matches. Ignores a stale reply from the previous command."""
+    deadline = time.monotonic() + timeout_s
+    last = ""
+    while time.monotonic() < deadline:
+        last = await session.command("GET_ERRORS")
+        if last == expected:
+            return last
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"GET_ERRORS expected {expected}, last reply {last!r}")
 
 
 async def wait_for_line(session, mark: int, needle: str, timeout_s: float, also=()) -> str:

@@ -417,7 +417,7 @@ Full 14-LED UI-order table for production silk 2.0 / 2.2 (`ledPinsV2_0`): `{1, 9
 **Rationale**:
 
 - **Single firmware binary**: one image supports both silk revisions; pinout is data in the hardware matrix.
-- **Safe default**: factory default is `"2.0"`; technicians set `"2.2"` when the board silk says 2.2.
+- **Factory default**: boards with no stored matrix are initialized to `"2.2"`. A stored `"2.0"`, `"2.2"`, or `"6"` is left unchanged on update. Legacy stored `"5"` still migrates to `"2.0"`.
 - **Separation of wake vs logic on 2.2**: GPIO2 stays on the RTC wake path; MCP reads distinguish flush from feed.
 - **No v6 remap for 2.2**: silk 2.2 keeps the original LED map; only button MCP pins change.
 
@@ -529,7 +529,7 @@ Board-to-board VMON readings at the same pack voltage vary, largely because of Z
 **Ratchet**:
 
 - Raise only when `isCharging` and `candidate − vFullMv > LEARN_MIN_DELTA_MV` (0.1 mV) so float/display-noise micro-raises do not persist or spam logs.
-- Step = `min(delta, FULL_SLOW_STEP_MV)` (3 mV) at all times — no fast early-life step.
+- When that gate passes, set `vFullMv` to `candidate` in one step. The 6-sample stdev check is the stability gate, so there is no per-update millivolt cap.
 - Floor at `VFULL_MV_MIN` (1500) only — **no soft upper clamp**; persist learned state; emit `[batt_full_learn] ...` on USB Serial + BLE serial (`SerialBLE_println`) and append the same line to `GET_LOGS`.
 - Never auto-lower for normal noise. If learned `vFullMv` overshoots in the field, reset via BLE `RESET_BATTERY_CAL` (dev mode).
 

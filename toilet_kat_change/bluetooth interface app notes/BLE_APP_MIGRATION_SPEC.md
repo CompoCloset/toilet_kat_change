@@ -47,11 +47,11 @@ Client implementations may use payload chunking to respect BLE MTU limits when w
 
 1. **Command channel (`...fea0`)**
    - Client writes command strings only.
-   - Examples: `TRUST_START`, `TRUST_STATUS`, `TRUST_CANCEL`, `GET_DEV_MODE`, `GET_FLUSH_COUNT`, `GET_BATTERY`, `SET_DEV_MODE:<0|1>`, `ENABLE_OTA`, `OTA_ROLLBACK_PREVIOUS`, `OTA_ROLLBACK_FACTORY`, `GET_LOGS`, `GET_LOGS:<offset>`, `GET_OTA_DIAG`, `GET_TASK_WDT`, `DISABLE_TASK_WDT`, `ENABLE_TASK_WDT`
+   - Examples: `TRUST_START`, `TRUST_STATUS`, `TRUST_CANCEL`, `GET_DEV_MODE`, `GET_FLUSH_COUNT`, `GET_ERRORS`, `GET_BATTERY`, `SET_DEV_MODE:<0|1>`, `ENABLE_OTA`, `OTA_ROLLBACK_PREVIOUS`, `OTA_ROLLBACK_FACTORY`, `GET_LOGS`, `GET_LOGS:<offset>`, `GET_OTA_DIAG`, `GET_TASK_WDT`, `DISABLE_TASK_WDT`, `ENABLE_TASK_WDT`
 
 2. **Response channel (`...fea4`)**
    - Client reads command responses only.
-   - Examples: `TRUST_WAITING`, `TRUST_CONFIRMED`, `TRUST_TIMEOUT`, `TRUST_CANCEL_ACK`, `AUTH_REQUIRED`, `DEV_MODE:0`, `FLUSH_COUNT:<n>`, `BATTERY:<n>`, `SET_DEV_MODE_ACK:1`, `OTA_ROLLBACK_ACK:REBOOTING`, `OTA_ROLLBACK_FACTORY_ACK:REBOOTING`, `LOGS:<offset>:<length>:<data>`, `LOGS_END`, `TASK_WDT:<enabled|disabled|pending_flush>`, `DISABLE_TASK_WDT_ACK`, `DISABLE_TASK_WDT_ERR:FLUSH_ACTIVE`, `ENABLE_TASK_WDT_ACK:PENDING_FLUSH`, etc.
+   - Examples: `TRUST_WAITING`, `TRUST_CONFIRMED`, `TRUST_TIMEOUT`, `TRUST_CANCEL_ACK`, `AUTH_REQUIRED`, `DEV_MODE:0`, `FLUSH_COUNT:<n>`, `ERRORS:NONE`, `ERRORS:<code>:<name>`, `BATTERY:<n>`, `SET_DEV_MODE_ACK:1`, `OTA_ROLLBACK_ACK:REBOOTING`, `OTA_ROLLBACK_FACTORY_ACK:REBOOTING`, `LOGS:<offset>:<length>:<data>`, `LOGS_END`, `TASK_WDT:<enabled|disabled|pending_flush>`, `DISABLE_TASK_WDT_ACK`, `DISABLE_TASK_WDT_ERR:FLUSH_ACTIVE`, `ENABLE_TASK_WDT_ACK:PENDING_FLUSH`, etc.
 
 3. **Parameter read channel (`...fea5`)**
    - Client reads current parameter snapshot only.
@@ -165,6 +165,25 @@ After OTA finalize, ESP-IDF sets flash `otadata` to `ota_state=NEW` (0) with an 
 When `pending_verify=1` in NVS, firmware increments `good_boot_streak` on each normal boot. After `OTA_GOOD_BOOT_STREAK_REQUIRED` (2) successful boots, `confirmOtaBootOk()` calls `esp_ota_mark_app_valid_cancel_rollback()`, which sets flash `ota_state` to `ESP_OTA_IMG_VALID` (2) on the active otadata sector.
 
 `GET_OTA_DIAG` `pending=0` is set only after mark-valid succeeds and NVS pending verification is cleared. If mark-valid fails, `pending` stays set so auto-rollback remains armed.
+
+---
+
+## Active Error (GET_ERRORS)
+
+Command `GET_ERRORS` returns the fault currently latched in `ERROR_CODE`. The device stores one active code. No trust handshake required. This is the live fault, not the historical log from `GET_LOGS`.
+
+### Protocol
+
+- **Command**: `GET_ERRORS`
+- **Response**:
+  - `ERRORS:NONE` when `ERROR_CODE` is 0
+  - `ERRORS:<code>:<name>` when a fault is latched (example: `ERRORS:3:heater_overheat`)
+- **Names**: `motor_timeout` (1), `low_battery` (2), `heater_overheat` (3), `motor_fault` (4), `heater_current_fail` (5), `heater_max_wall` (6), `eeprom_invalid` (7), `heater_failsafe` (8), `heater_max_temp_failsafe` (9), `task_wdt_unhealthy` (10), `thermistor_disconnected` (11). Unknown codes use `unknown`.
+- **Flow**: Client writes `GET_ERRORS` to command characteristic (`...fea0`), reads response from response channel (`...fea4`).
+
+### App use case
+
+Read on connect and while connected to show the active device fault. Code 6 is advisory and does not block a flush. Every other non-zero code blocks a flush until the device clears it.
 
 ---
 

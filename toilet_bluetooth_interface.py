@@ -1041,6 +1041,28 @@ class ToiletSystemInterface:
                 pass
         return result
 
+    async def get_active_errors(self) -> Optional[list]:
+        """Read the fault currently latched on the device.
+
+        Command: GET_ERRORS
+        None active: ERRORS:NONE
+        Active: ERRORS:<code>:<name>
+
+        Returns a list of {code, name} dicts (empty when clear), or None on failure.
+        The device latches a single code, so the list has at most one entry.
+        """
+        response = await self._send_command_and_read_response("GET_ERRORS")
+        if not response:
+            print("No response from firmware for GET_ERRORS")
+            return None
+        if response == "ERRORS:NONE":
+            return []
+        match = re.match(r"^ERRORS:(\d+):([a-z0-9_]+)$", response)
+        if not match:
+            print(f"Unexpected GET_ERRORS response: {response}")
+            return None
+        return [{"code": int(match.group(1)), "name": match.group(2)}]
+
     async def get_battery(self) -> Optional[int]:
         """Read battery charge level (0-100%) from firmware. Returns int or None on failure."""
         response = await self._send_command_and_read_response("GET_BATTERY")
@@ -1770,8 +1792,9 @@ async def main():
             print("30. Read battery calibration debug (GET_BATTERY_DEBUG)")
             print("31. Reset battery calibration to seed (RESET_BATTERY_CAL)")
             print("32. Read battery temperature (GET_BATTERY_TEMP)")
+            print("33. Read active error code (GET_ERRORS)")
             
-            choice = input("\nEnter your choice (1-32): ").strip()
+            choice = input("\nEnter your choice (1-33): ").strip()
             
             if choice == "1":
                 print("\nReading current parameters...")
@@ -2286,8 +2309,19 @@ async def main():
                         f"(ADC {sample['adc']}, {sample['resistance_ohms']:.0f} ohm)"
                     )
 
+            elif choice == "33":
+                print("\nReading active error code...")
+                errors = await interface.get_active_errors()
+                if errors is None:
+                    print("Failed to read active error code")
+                elif not errors:
+                    print("No error code is active")
+                else:
+                    for error in errors:
+                        print(f"Active error {error['code']}: {error['name']}")
+
             else:
-                print("Invalid choice. Please enter 1-32.")
+                print("Invalid choice. Please enter 1-33.")
     
     except KeyboardInterrupt:
         print("\nProgram interrupted by user")

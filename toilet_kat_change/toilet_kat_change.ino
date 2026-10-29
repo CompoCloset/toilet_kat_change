@@ -91,11 +91,11 @@ struct BatteryVoltageSample {
 constexpr float kBattMvCalA = 0.000009091f;
 constexpr float kBattMvCalB = -0.019148f;
 constexpr float kBattMvCalC = 17.397361f;
-// Full-anchor ratchet (learned vFullMv in VMON_CAL mV); seed is BLE/material param
+// Full-anchor ratchet (learned vFullMv in VMON_CAL mV); seed is BLE/material param.
+// A stable charging window jumps vFullMv to the window mean (upward only).
 constexpr float kVFullMvSeed = 1550.0f;
 constexpr float VFULL_MV_MIN = 1500.0f;
 constexpr float VFULL_MV_HARD_MAX = 2200.0f;  // seed write sanity only; learned value has no soft max
-constexpr float FULL_SLOW_STEP_MV = 3.0f;  // sole upward step rate (charge-gated)
 constexpr unsigned long FULL_POST_LOAD_SETTLE_MS = 60000UL;
 constexpr int BATT_FULL_LEARN_WINDOW = 6;
 constexpr float LEARN_STDEV_MAX_MV = 1.0f;  // reject jagged windows; candidate is mean
@@ -326,14 +326,14 @@ struct HWCFGConfigStore {
 #  if __has_include("software_version_build.h")
 #    include "software_version_build.h"
 #  else
-const char* SOFTWARE_VERSION_NUMBER = "4.2.9";
-const char* FACTORY_SOFTWARE_DATE = "2026-06-18";
-const char* SOFTWARE_BUILD_DATE = "2026-10-26";  // YYYY-MM-DD — update with each build
+const char* SOFTWARE_VERSION_NUMBER = "4.3.0";
+const char* FACTORY_SOFTWARE_DATE = "2026-10-29";
+const char* SOFTWARE_BUILD_DATE = "2026-10-29";  // YYYY-MM-DD — update with each build
 #  endif
 #else
-const char* SOFTWARE_VERSION_NUMBER = "4.2.9";
-const char* FACTORY_SOFTWARE_DATE = "2026-06-18";
-const char* SOFTWARE_BUILD_DATE = "2026-10-26";  // YYYY-MM-DD — update with each build
+const char* SOFTWARE_VERSION_NUMBER = "4.3.0";
+const char* FACTORY_SOFTWARE_DATE = "2026-10-29";
+const char* SOFTWARE_BUILD_DATE = "2026-10-29";  // YYYY-MM-DD — update with each build
 #endif
 
 // Forward declarations
@@ -1028,6 +1028,23 @@ const int HEATER_FAILSAFE_ERROR_CODE = 8;
 const int HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE = 9;
 const int TASK_WDT_UNHEALTHY_ERROR_CODE = 10;
 const int THERMISTOR_DISCONNECTED_ERROR_CODE = 11;
+
+const char* activeErrorCodeName(int errorCode) {
+  switch (errorCode) {
+    case 1: return "motor_timeout";
+    case 2: return "low_battery";
+    case 3: return "heater_overheat";
+    case 4: return "motor_fault";
+    case 5: return "heater_current_fail";
+    case 6: return "heater_max_wall";
+    case EEPROM_INVALID_ERROR_CODE: return "eeprom_invalid";
+    case HEATER_FAILSAFE_ERROR_CODE: return "heater_failsafe";
+    case HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE: return "heater_max_temp_failsafe";
+    case TASK_WDT_UNHEALTHY_ERROR_CODE: return "task_wdt_unhealthy";
+    case THERMISTOR_DISCONNECTED_ERROR_CODE: return "thermistor_disconnected";
+    default: return "unknown";
+  }
+}
 const int HEATER_CURRENT_ADC_THRESHOLD = 200;
 const unsigned long TASK_WDT_TIMEOUT_MS = 5000UL;
 const uint8_t TASK_WDT_INIT_MAX_ATTEMPTS = 3;
@@ -1562,6 +1579,17 @@ class command_characteristic_callbacks: public BLECharacteristicCallbacks {
       writeResponseToChannel(flushCountMessage);
       Serial.printf("Processed GET_FLUSH_COUNT, returned %s\n", flushCountMessage.c_str());
       sendSerialToBLE("Processed GET_FLUSH_COUNT");
+      return;
+    }
+    if (cmd == "GET_ERRORS") {
+      // Single latched fault. ERROR_CODE 0 means nothing is active.
+      String message = "ERRORS:NONE";
+      if (ERROR_CODE != 0) {
+        message = String("ERRORS:") + String(ERROR_CODE) + ":" + activeErrorCodeName(ERROR_CODE);
+      }
+      writeResponseToChannel(message);
+      Serial.printf("Processed GET_ERRORS, returned %s\n", message.c_str());
+      sendSerialToBLE("Processed GET_ERRORS");
       return;
     }
     if (cmd == "GET_BATTERY") {
@@ -3584,7 +3612,8 @@ void initializeDefaultHardwareMatrix(HardwareMatrix& matrix) {
   matrix.matrix_magic = HW_MATRIX_MAGIC;
   matrix.matrix_schema_version = HW_MATRIX_SCHEMA_VERSION;
   matrix.component_count = HW_COMPONENT_COUNT;
-  setHardwareComponentDefaults(matrix.components[HW_CONTROL_PANEL], "2.0", "CONTROL INTERFACE FOR DEVICE", "2026-02-28");
+  // First boot only. A stored matrix is loaded as-is (legacy "5" still migrates to "2.0").
+  setHardwareComponentDefaults(matrix.components[HW_CONTROL_PANEL], "2.2", "CONTROL INTERFACE FOR DEVICE", "2026-02-28");
   setHardwareComponentDefaults(matrix.components[HW_HEATING_ELEMENT], "1", "VERSION OF THE HEATING ELEMENT IN THE SEALING MECHANISM", "2026-02-28");
   setHardwareComponentDefaults(matrix.components[HW_MAIN_CIRCUIT_BOARD], "5", "MAIN CONROL PANEL FOR LOGIC", "2026-02-28");
   setHardwareComponentDefaults(matrix.components[HW_VACUUM_FAN], "1", "FAN IN THE SEALER HARDWARE TO ADJUST INTERNAL PRESSURE", "2026-02-28");
@@ -7645,6 +7674,21 @@ void loop() {
             return;
           }
 
+          if (isBlockingFlushError(ERROR_CODE)) {
+            if (!button1DisconnectAlertedForCurrentPress) {
+              char blockMsg[48];
+              snprintf(blockMsg, sizeof(blockMsg), "Flush blocked: error_code=%d", ERROR_CODE);
+              Serial.println(blockMsg);
+              SerialBLE_println(blockMsg);
+              logFlushEvent("flush_event", ERROR_CODE, "blocked_latched_error", true);
+              displayErrorCodeLeds(ERROR_CODE);
+              button1DisconnectAlertedForCurrentPress = true;
+            }
+            button1Held = false;
+            button1DelayActive = false;
+            return;
+          }
+
           cutBag = true;
           if (usbTestButton1) {
             // Drop the simulated hold once the flush is committed so the next
@@ -7702,6 +7746,7 @@ void loop() {
     /* One sequential else-if chain handling:
     Button2 just pressed → start delay timer
     Button2 pressed and delay passed → start M2 feed ramp and M3 fan
+      (flush-blocking error codes refuse feed and replay the error LEDs)
     Button2 pressed continuously → ramp/hold M2 and animate LEDs
     Button2 just released → stop M2, start fan timer, keep M3 running
     Fan timer active (< fanDuration) → keep M3 running
@@ -7718,7 +7763,20 @@ void loop() {
       // Delay passed while button still pressed - start feed immediately at low speed.
       button2DelayActive = false;
       button2FanStartTime = millis();
-      if (isHardwareLikelyDisconnectedForUserAction()) {
+      if (isBlockingFlushError(ERROR_CODE)) {
+        motors.setM2Speed(0);
+        setFanSpeed(0);
+        fanRunning = false;
+        button2FeedStarted = false;
+        stopManualFeed();
+        if (!button2DisconnectAlertedForCurrentPress) {
+          char blockMsg[48];
+          snprintf(blockMsg, sizeof(blockMsg), "Feed blocked: error_code=%d", ERROR_CODE);
+          SerialBLE_println(blockMsg);
+          displayErrorCodeLeds(ERROR_CODE);
+          button2DisconnectAlertedForCurrentPress = true;
+        }
+      } else if (isHardwareLikelyDisconnectedForUserAction()) {
         if (!button2DisconnectAlertedForCurrentPress) {
           SerialBLE_println("Hardware not connected (thermistor open) - feed blocked");
           playHardwareNotConnectedAlert();
@@ -7752,15 +7810,21 @@ void loop() {
       button2WasPressed = false;
       fanRunning = false;
     } else if (!button2Pressed && button2WasPressed) {
-      // Button 2 just released - stop feed motor, start fan timer
-      SerialBLE_println("Feed Down Released - Stopping feed, starting fan timer");
+      // Button 2 just released. A blocked press must not start the post-feed fan.
+      bool feedBlocked = button2DisconnectAlertedForCurrentPress;
       stopManualFeed();
       button2FeedStarted = false;  // Reset flag for next button press
       button2DisconnectAlertedForCurrentPress = false;
       button2FanStartTime = 0;
-      fanStartTime = millis();  // Start fan timer
-      fanRunning = true;        // Set fan running flag
-      //setFanSpeed(255);  // Keep fan running during timer
+      if (feedBlocked) {
+        setFanSpeed(0);
+        fanRunning = false;
+      } else {
+        SerialBLE_println("Feed Down Released - Stopping feed, starting fan timer");
+        fanStartTime = millis();  // Start fan timer
+        fanRunning = true;        // Set fan running flag
+        //setFanSpeed(255);  // Keep fan running during timer
+      }
     } else if (!button2Pressed && fanRunning && (millis() - fanStartTime < fanDuration * 1000)) {
       // Throttle keep-running status logs to avoid BLE spam in the loop.
       static unsigned long lastFanKeepRunningLog = 0;
@@ -7771,9 +7835,10 @@ void loop() {
       // Fan timer is active - keep M3 running
       //setFanSpeed(255);  // Keep fan running
     } else if (!button2Pressed && fanRunning && (millis() - fanStartTime >= fanDuration * 1000)) {
-      // Manual-feed fan timer finished. Duty schedule decides the next level.
+      // Manual-feed fan timer finished. Stop the sealer fan. Aux fan duty is separate.
       SerialBLE_println("b2 not pressed, fan running, time out ");
-      Serial.println("Fan timer completed - returning fan to duty schedule");
+      Serial.println("Fan timer completed - stopping fan");
+      setFanSpeed(0);
       fanRunning = false;
     } else if (!isFlushing) {
       fanRunning = false;
@@ -9826,10 +9891,9 @@ void onIdleBattMvSample(float mvCal, unsigned long now) {
     return;
   }
 
-  float stepCap = FULL_SLOW_STEP_MV;
-  float step = delta < stepCap ? delta : stepCap;
+  // Window already passed the stdev gate: take the stable mean in one step.
   float oldV = vFullMv;
-  float next = vFullMv + step;
+  float next = candidate;
   if (next < VFULL_MV_MIN) {
     next = VFULL_MV_MIN;
   }
@@ -9842,8 +9906,8 @@ void onIdleBattMvSample(float mvCal, unsigned long now) {
 
   char msg[128];
   snprintf(msg, sizeof(msg),
-           "vFullMv %.1f->%.1f step=%.1f flush=%lu",
-           oldV, vFullMv, step, (unsigned long)lifetimeFlushCount);
+           "vFullMv %.1f->%.1f delta=%.1f flush=%lu",
+           oldV, vFullMv, vFullMv - oldV, (unsigned long)lifetimeFlushCount);
   logBattFullLearnUpdate(msg, mvCal);
 }
 
@@ -11575,14 +11639,7 @@ void LEDErrorCode(int errorCode) { // Modified to accept errorCode
   Serial.print("Flashing Error Code: ");
   Serial.println(errorCode);
   if (errorCode != EEPROM_INVALID_ERROR_CODE) {
-    const char* msg = (errorCode == 1) ? "motor_timeout" : (errorCode == 2) ? "low_battery" :
-      (errorCode == 3) ? "heater_overheat" : (errorCode == 4) ? "motor_fault" :
-      (errorCode == 5) ? "heater_current_fail" : (errorCode == 6) ? "heater_max_wall" :
-      (errorCode == HEATER_FAILSAFE_ERROR_CODE) ? "heater_failsafe" :
-      (errorCode == HEATER_MAX_TEMP_FAILSAFE_ERROR_CODE) ? "heater_max_temp_failsafe" :
-      (errorCode == TASK_WDT_UNHEALTHY_ERROR_CODE) ? "task_wdt_unhealthy" :
-      (errorCode == THERMISTOR_DISCONNECTED_ERROR_CODE) ? "thermistor_disconnected" : "unknown";
-    logError("runtime", errorCode, msg, true);
+    logError("runtime", errorCode, activeErrorCodeName(errorCode), true);
   }
   displayErrorCodeLeds(errorCode);
 }

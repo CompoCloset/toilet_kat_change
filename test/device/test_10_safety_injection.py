@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from test.device.bench import clear_and_disable, enable_test_mode, start_flush, wait_for_line
+from test.device.bench import (
+    clear_and_disable,
+    enable_test_mode,
+    expect_get_errors,
+    start_flush,
+    wait_for_line,
+)
 from test.device.fast_cycle import FAILSAFE_INJECT_C
 
 pytestmark = pytest.mark.hardware
@@ -22,6 +28,7 @@ def test_injected_temp_above_failsafe_trips_error_9(device) -> None:
             reply = await session.serial_command(f"TEMP:{FAILSAFE_INJECT_C}")
             assert reply.startswith("TEMP:"), reply
             await wait_for_line(session, mark, "absolute max temperature exceeded", 8.0)
+            await expect_get_errors(session, "ERRORS:9:heater_max_temp_failsafe")
         finally:
             await clear_and_disable(session)
 
@@ -39,6 +46,7 @@ def test_injected_open_thermistor_mid_flush_trips_error_11(device) -> None:
             reply = await session.serial_command("THERM:OPEN")
             assert reply == "THERM:OPEN", reply
             await wait_for_line(session, mark, "main thermistor disconnected during flush", 15.0)
+            await expect_get_errors(session, "ERRORS:11:thermistor_disconnected")
         finally:
             await clear_and_disable(session)
 

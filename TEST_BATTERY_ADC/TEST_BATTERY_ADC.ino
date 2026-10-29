@@ -42,7 +42,6 @@ constexpr float LEARN_MIN_DELTA_MV = 0.1f;  // ignore sub-0.1 mV float noise rai
 constexpr float kVFullMvSeed = 1550.0f;
 constexpr float VFULL_MV_MIN = 1500.0f;
 constexpr float kVFullMvMax = 1920.0f;
-constexpr float FULL_SLOW_STEP_MV = 3.0f;  // sole upward step rate (charge-gated)
 
 struct ChargeSample {
   float mv;
@@ -389,11 +388,8 @@ static bool updateBattFullLearn(float mvCal, WindowStats* outStats, float* outCa
     return false;
   }
 
-  float stepCap = FULL_SLOW_STEP_MV;
-  float step = delta < stepCap ? delta : stepCap;
-  *outStep = step;
-
-  float next = vFullMv + step;
+  // Stable window: jump to the mean (matches firmware). outStep is the applied delta.
+  float next = mean;
   if (next < VFULL_MV_MIN) {
     next = VFULL_MV_MIN;
   }
@@ -406,9 +402,10 @@ static bool updateBattFullLearn(float mvCal, WindowStats* outStats, float* outCa
 
   float oldV = vFullMv;
   vFullMv = next;
+  *outStep = vFullMv - oldV;
   Serial.printf(
-      "[batt_full_learn] vFullMv %.1f->%.1f step=%.1f candidate=%.1f stdev=%.3f\n",
-      oldV, vFullMv, step, mean, stdev);
+      "[batt_full_learn] vFullMv %.1f->%.1f delta=%.1f candidate=%.1f stdev=%.3f\n",
+      oldV, vFullMv, *outStep, mean, stdev);
   return true;
 }
 
@@ -440,11 +437,10 @@ void setup() {
       CHARGE_DROP_RESET_MV);
   Serial.printf(
       "LEARN gate: n==%d, stdev<=%.1fmV, candidate=mean, requires charging, "
-      "raise if delta>%.1fmV step<=%.1fmV\n",
+      "jump to mean if delta>%.1fmV\n",
       BATT_FULL_LEARN_WINDOW,
       LEARN_STDEV_MAX_MV,
-      LEARN_MIN_DELTA_MV,
-      FULL_SLOW_STEP_MV);
+      LEARN_MIN_DELTA_MV);
   Serial.println(
       F("Columns: SAMPLE / CHARGE / LEARN  (deltaMv = rise+/fall- vs previous sample)"));
 }
