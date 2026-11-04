@@ -7504,7 +7504,14 @@ void loop() {
       button1Held = false;
       button1DelayActive = false;
       button2DelayActive = false;
+      // Hold-to-run feed must end before the battery load test. Leaving M2
+      // spinning stacks the auger on the heater sag test, and the single-button
+      // chain below never sees the release, so the feed cannot be stopped.
+      stopManualFeed();
+      setFanSpeed(0);
+      fanRunning = false;
       button2FeedStarted = false;
+      button2DisconnectAlertedForCurrentPress = false;
 
       bothButtonsPressed = true;
       batteryDisplayMode = true;
@@ -7807,8 +7814,11 @@ void loop() {
     } else if (!button2Pressed && button2WasPressed
                && millis() - lastDualButtonEdgeMillis < DUAL_BUTTON_EDGE_GUARD_MS) {
       // Ignore spurious release after dual-button stop (MCP read flicker).
-      button2WasPressed = false;
+      stopManualFeed();
+      setFanSpeed(0);
       fanRunning = false;
+      button2FeedStarted = false;
+      button2WasPressed = false;
     } else if (!button2Pressed && button2WasPressed) {
       // Button 2 just released. A blocked press must not start the post-feed fan.
       bool feedBlocked = button2DisconnectAlertedForCurrentPress;
@@ -7856,7 +7866,29 @@ void loop() {
     button2DisconnectAlertedForCurrentPress = false;
     Serial.println("Button 2 released before delay - cancelled");
   }
-  
+
+  // Battery display and the dual-button latch skip the chain above, and the
+  // wasPressed update below would consume the release. Stop a hold-to-run feed
+  // whenever the feed button is up so M2 cannot stay latched.
+  if (!button2Pressed && (manualFeedActive || button2FeedStarted)) {
+    bool dualGesture = batteryDisplayMode || bothButtonsPressed || bothButtonsPressedNow
+        || (millis() - lastDualButtonEdgeMillis < DUAL_BUTTON_EDGE_GUARD_MS);
+    bool feedBlocked = button2DisconnectAlertedForCurrentPress;
+    stopManualFeed();
+    button2FeedStarted = false;
+    button2DelayActive = false;
+    button2DisconnectAlertedForCurrentPress = false;
+    if (feedBlocked || dualGesture) {
+      setFanSpeed(0);
+      fanRunning = false;
+      SerialBLE_println("Feed stopped - button released outside single-button chain");
+    } else {
+      SerialBLE_println("Feed Down Released - Stopping feed, starting fan timer");
+      fanStartTime = millis();
+      fanRunning = true;
+    }
+  }
+
   button1WasPressed = button1Pressed;
   button2WasPressed = button2Pressed;
 
@@ -8716,7 +8748,15 @@ void stopManualFeed() {
   manualFeedStartMillis = 0;
   manualFeedLastSpeed = 0;
   motors.setM2Speed(0);
-  resetFeedButtonLeds();
+  // Battery readout and flush own the panel LEDs. Clearing them here wiped the
+  // charge display when feed was cancelled by the other button.
+  if (batteryDisplayMode || flushOwnsControlPanelLeds()) {
+    feedLedPatternActive = false;
+    feedLedLastUpdateMillis = 0;
+    feedLedHeadIndex = 0;
+  } else {
+    resetFeedButtonLeds();
+  }
 }
 
 void updateManualFeedRamp() {
