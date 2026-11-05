@@ -42,6 +42,7 @@ Use `--auto-build` to test **current source code** instead of hand-picked manife
 | OTA1 | `ota_0` | regA build | `{base}-regA` |
 | OTA2 | `ota_1` | regB build | `{base}-regB` |
 | Rollback | `ota_0` | (no flash) | `{base}-regA` |
+| Second rollback | `ota_0` (unchanged) | (no flash) | rejected; still `{base}-regA` |
 | OTA3 | `ota_1` | regB | `{base}-regB` |
 | OTA4 | `ota_0` | regA | `{base}-regA` |
 | Factory Reset | `factory` | (otadata only) | SARAH version |
@@ -100,8 +101,10 @@ Each OTA binary must be `<= 0x480000` bytes (4.5 MiB).
 The harness verifies this exact transition sequence:
 
 ```text
-factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+factory -> ota_0 -> ota_1 -> ota_0 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
 ```
+
+The repeated `ota_0` is the second rollback. After OTA2 boots on `ota_1`, the first `OTA_ROLLBACK_PREVIOUS` returns to the OTA1 image on `ota_0`. The next `OTA_ROLLBACK_PREVIOUS`, sent immediately, must be rejected with `OTA_ROLLBACK_ERR:ALREADY_ON_TARGET`. The board stays on `ota_0` and does not reboot.
 
 Step mapping:
 
@@ -111,6 +114,7 @@ Step mapping:
 | OTA1 | BLE OTA | `ota_0` | OTA1 binary |
 | OTA2 | BLE OTA | `ota_1` | OTA2 binary |
 | Rollback | BLE `OTA_ROLLBACK_PREVIOUS` / serial sim (`--fast`) | `ota_0` | OTA1 binary |
+| Second rollback | BLE `OTA_ROLLBACK_PREVIOUS` again | `ota_0` | OTA1 binary; command rejected |
 | OTA3 | BLE OTA / serial sim (`--fast`) | `ota_1` | OTA3 binary |
 | OTA4 | BLE OTA / serial sim (`--fast`) | `ota_0` | OTA4 binary |
 | Factory Reset | BLE `OTA_ROLLBACK_FACTORY` / serial sim (`--fast`) | `factory` | factory binary |
@@ -118,7 +122,7 @@ Step mapping:
 
 ## Fast Mode (`--fast`)
 
-Use fast mode for day-to-day iteration. It keeps the same partition sequence but only performs **two real BLE OTA transfers** (OTA1 and OTA2). OTA3–OTA5, rollback, and factory reset are simulated by writing the target slot over USB and setting `otadata`.
+Use fast mode for day-to-day iteration. It keeps the same partition sequence but only performs **two real BLE OTA transfers** (OTA1 and OTA2). The first rollback, OTA3–OTA5, and factory reset are simulated by writing the target slot over USB and setting `otadata`. The second rollback is a real BLE command in both modes.
 
 | Step | Full mode | Fast mode |
 |------|-----------|-----------|
@@ -126,6 +130,7 @@ Use fast mode for day-to-day iteration. It keeps the same partition sequence but
 | OTA1 | BLE | BLE |
 | OTA2 | BLE | BLE |
 | Rollback | BLE `OTA_ROLLBACK_PREVIOUS` | USB otadata boot to `ota_0` |
+| Second rollback | BLE `OTA_ROLLBACK_PREVIOUS` rejected with `ALREADY_ON_TARGET` | Same BLE rejection; slot stays `ota_0` |
 | OTA3 | BLE | USB flash `ota_1` + otadata |
 | OTA4 | BLE | USB flash `ota_0` + otadata |
 | Factory Reset | BLE `OTA_ROLLBACK_FACTORY` | USB otadata erase (factory boot) |
@@ -136,11 +141,12 @@ Use fast mode for day-to-day iteration. It keeps the same partition sequence but
 - Partition boot path and version identity after each hop
 - BLE connectivity and boot health diagnostics
 - Real BLE OTA transport for OTA1 and OTA2 (including `pending=0`)
+- The second `OTA_ROLLBACK_PREVIOUS` is rejected with `OTA_ROLLBACK_ERR:ALREADY_ON_TARGET` and the slot stays `ota_0`
 
 ### Fast mode does not validate
 
 - BLE OTA transport for OTA3–OTA5
-- BLE rollback / factory-reset commands
+- The first BLE rollback and the factory-reset command
 - NVS rollback diagnostics on simulated rollback steps
 
 Use **full mode** (no `--fast`) as the pre-release deployment gate.
@@ -156,6 +162,7 @@ The run **passes** only if all checks succeed:
 - Version evolution table in the report shows PASS for every hop.
 - OTA pending verification clears (`GET_OTA_DIAG` shows `pending=0`) after each **BLE** OTA step.
 - Manual rollback returns to the previous OTA slot and diagnostics/logs reflect a rollback event (**full mode only**).
+- A second `OTA_ROLLBACK_PREVIOUS`, sent immediately after that return, is rejected with `OTA_ROLLBACK_ERR:ALREADY_ON_TARGET` and the board stays on `ota_0` (full mode and fast mode).
 - Factory rollback returns to `factory` and BLE remains connectable.
 - No `UPDATE_ERROR`, MD5 mismatch, panic, watchdog, brownout, or unexpected partition is observed.
 - Diagnostic collection steps complete; failures are recorded as test failures.
@@ -192,7 +199,7 @@ python scripts/run_ota_regression.py `
   --fast
 ```
 
-No trust-handshake prompts in fast mode (rollback/factory reset are serial-simulated).
+Fast mode still sends the second rollback over BLE. DEV mode auto-grants trust, so there is no button prompt. The first rollback and factory reset stay serial-simulated.
 
 ### Manual manifest CLI
 
@@ -240,7 +247,7 @@ python scripts/run_ota_regression.py --auto-build --dry-run
 3. Keep phone apps disconnected from the toilet during the run.
 4. Allow ~30 s for cold boot before the first BLE connection after power-on.
 
-**Fast mode** skips BLE trust prompts for rollback and factory reset.
+**Fast mode** sends the second rollback over BLE. DEV mode auto-grants trust for that command. The first rollback and factory reset stay serial-simulated and do not prompt.
 
 ## Reports
 

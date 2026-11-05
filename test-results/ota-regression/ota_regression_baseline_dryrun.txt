@@ -7,8 +7,8 @@ Dry run: True
 Port: COM6
 BLE address: None
 
-Partition sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
-Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+Partition sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
+Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_0 -> ota_1 -> ota_0 -> factory -> ota_0
 
 [PASS] flash_factory (0.0s)
   expected partition: factory
@@ -23,6 +23,10 @@ Expected sequence: factory -> ota_0 -> ota_1 -> ota_0 -> ota_1 -> ota_0 -> facto
   observed partition: ota_1
 
 [PASS] rollback_previous (0.0s)
+  expected partition: ota_0
+  observed partition: ota_0
+
+[PASS] rollback_previous_repeat (0.0s)
   expected partition: ota_0
   observed partition: ota_0
 

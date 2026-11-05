@@ -1539,17 +1539,21 @@ class ToiletSystemInterface:
             return False
         return await self.prepare_ota_update()
 
-    async def ota_rollback_previous(self) -> bool:
-        """Request firmware rollback to the previous OTA partition. Device reboots on success."""
+    async def ota_rollback_previous_response(self) -> Optional[str]:
+        """Send OTA_ROLLBACK_PREVIOUS and return the ACK or error. Does not treat rejection as success."""
         if not self.trusted:
             if not await self.trust_handshake():
                 print("OTA rollback aborted: trust handshake required.")
-                return False
-        response = await self._send_command_and_poll_response(
+                return None
+        return await self._send_command_and_poll_response(
             "OTA_ROLLBACK_PREVIOUS",
             success_responses=("OTA_ROLLBACK_ACK:REBOOTING",),
             error_prefixes=("OTA_ROLLBACK_ERR:",),
         )
+
+    async def ota_rollback_previous(self) -> bool:
+        """Request firmware rollback to the previous OTA partition. Device reboots on success."""
+        response = await self.ota_rollback_previous_response()
         if not response:
             print("No rollback ACK from firmware for OTA_ROLLBACK_PREVIOUS (timed out waiting on fea4)")
             return False

@@ -327,12 +327,12 @@ struct HWCFGConfigStore {
 #  if __has_include("software_version_build.h")
 #    include "software_version_build.h"
 #  else
-const char* SOFTWARE_VERSION_NUMBER = "4.3.1";
+const char* SOFTWARE_VERSION_NUMBER = "4.3.2";
 const char* FACTORY_SOFTWARE_DATE = "2026-11-05";
 const char* SOFTWARE_BUILD_DATE = "2026-11-05";  // YYYY-MM-DD — update with each build
 #  endif
 #else
-const char* SOFTWARE_VERSION_NUMBER = "4.3.1";
+const char* SOFTWARE_VERSION_NUMBER = "4.3.2";
 const char* FACTORY_SOFTWARE_DATE = "2026-11-05";
 const char* SOFTWARE_BUILD_DATE = "2026-11-05";  // YYYY-MM-DD — update with each build
 #endif
@@ -5713,10 +5713,17 @@ static bool applyRollbackBootPartition(const esp_partition_t* rollback_partition
   return true;
 }
 
-static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternateOut) {
+static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternateOut, bool* alreadyOnTargetOut) {
   const esp_partition_t* running = esp_ota_get_running_partition();
   const esp_partition_t* rollback_partition = NULL;
   uint8_t rollback_subtype = OTA_SUBTYPE_UNSET;
+
+  if (usedAlternateOut != NULL) {
+    *usedAlternateOut = false;
+  }
+  if (alreadyOnTargetOut != NULL) {
+    *alreadyOnTargetOut = false;
+  }
 
   nvs_handle_t nvs_handle;
   if (nvs_open("ota", NVS_READONLY, &nvs_handle) == ESP_OK) {
@@ -5726,12 +5733,18 @@ static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternate
     nvs_close(nvs_handle);
   }
 
-  const esp_partition_t* alternate = findAlternateOtaSlotPartition();
-  if (rollback_partition == NULL || (running != NULL && rollback_partition == running)) {
+  // Saved return slot is the one already running. Do not promote the other image.
+  if (rollback_partition != NULL && running != NULL && rollback_partition == running) {
+    if (alreadyOnTargetOut != NULL) {
+      *alreadyOnTargetOut = true;
+    }
+    Serial.println("Rollback refused: already running the saved return slot");
+    return NULL;
+  }
+
+  if (rollback_partition == NULL) {
+    const esp_partition_t* alternate = findAlternateOtaSlotPartition();
     if (alternate == NULL) {
-      if (usedAlternateOut != NULL) {
-        *usedAlternateOut = false;
-      }
       return NULL;
     }
     if (usedAlternateOut != NULL) {
@@ -5746,9 +5759,6 @@ static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternate
     return alternate;
   }
 
-  if (usedAlternateOut != NULL) {
-    *usedAlternateOut = false;
-  }
   return rollback_partition;
 }
 
@@ -5756,15 +5766,16 @@ bool logOtaRollback(const char* trigger, const char* reason, String* errorCode) 
   Serial.printf("OTA rollback handler (%s)\n", SOFTWARE_VERSION_NUMBER);
   running_partition = esp_ota_get_running_partition();
   bool usedAlternate = false;
-  const esp_partition_t* rollback_partition = resolveRollbackTargetPartition(&usedAlternate);
+  bool alreadyOnTarget = false;
+  const esp_partition_t* rollback_partition = resolveRollbackTargetPartition(&usedAlternate, &alreadyOnTarget);
   if (rollback_partition == NULL) {
     if (errorCode != NULL) {
-      *errorCode = "NO_ROLLBACK_INFO";
+      *errorCode = alreadyOnTarget ? "ALREADY_ON_TARGET" : "NO_ROLLBACK_INFO";
     }
     return false;
   }
   if (usedAlternate) {
-    Serial.println("Rollback: using alternate OTA slot (NVS missing or pointed at current slot)");
+    Serial.println("Rollback: using alternate OTA slot (NVS rollback metadata missing)");
   }
 
   recordOtaRollbackDiag(trigger, reason, rollback_partition);
@@ -5924,16 +5935,21 @@ void checkBootFailure() {
 bool rollbackOTAUpdateWithReason(String* errorCode) {
   Serial.println("Attempting OTA rollback...");
   bool usedAlternate = false;
-  const esp_partition_t* rollback_partition = resolveRollbackTargetPartition(&usedAlternate);
+  bool alreadyOnTarget = false;
+  const esp_partition_t* rollback_partition = resolveRollbackTargetPartition(&usedAlternate, &alreadyOnTarget);
   if (rollback_partition == NULL) {
-    Serial.println("ERROR: No rollback partition available");
+    if (alreadyOnTarget) {
+      Serial.println("ERROR: Already running the saved rollback slot");
+    } else {
+      Serial.println("ERROR: No rollback partition available");
+    }
     if (errorCode != NULL) {
-      *errorCode = "NO_ROLLBACK_INFO";
+      *errorCode = alreadyOnTarget ? "ALREADY_ON_TARGET" : "NO_ROLLBACK_INFO";
     }
     return false;
   }
   if (usedAlternate) {
-    Serial.println("Rollback: using alternate OTA slot (NVS missing or pointed at current slot)");
+    Serial.println("Rollback: using alternate OTA slot (NVS rollback metadata missing)");
   }
   return applyRollbackBootPartition(rollback_partition, errorCode);
 }

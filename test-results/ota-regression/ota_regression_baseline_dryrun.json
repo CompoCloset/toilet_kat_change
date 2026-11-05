@@ -11,6 +11,7 @@
     "ota_0",
     "ota_1",
     "ota_0",
+    "ota_0",
     "ota_1",
     "ota_0",
     "factory",
@@ -70,6 +71,20 @@
       "logs_excerpt": "",
       "errors": [],
       "started_at": "2026-06-18T16:03:55.379657+00:00",
+      "ended_at": "2026-06-18T16:03:55.379660+00:00",
+      "duration_s": 0.0
+    },
+    {
+      "name": "rollback_previous_repeat",
+      "passed": true,
+      "expected_partition": "ota_0",
+      "observed_partition": "ota_0",
+      "version": null,
+      "ota_diag": {},
+      "boot_info": null,
+      "logs_excerpt": "",
+      "errors": [],
+      "started_at": "2026-06-18T16:03:55.379660+00:00",
       "ended_at": "2026-06-18T16:03:55.379660+00:00",
       "duration_s": 0.0
     },

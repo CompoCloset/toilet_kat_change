@@ -59,6 +59,7 @@ EXPECTED_PARTITION_SEQUENCE = [
     "ota_0",
     "ota_1",
     "ota_0",
+    "ota_0",
     "ota_1",
     "ota_0",
     "factory",
@@ -70,6 +71,7 @@ REGRESSION_STEP_ORDER = [
     "ota1",
     "ota2",
     "rollback_previous",
+    "rollback_previous_repeat",
     "ota3",
     "ota4",
     "factory_reset",
@@ -81,10 +83,11 @@ PRIOR_PARTITION_SEQUENCE = {
     "ota1": ["factory"],
     "ota2": ["factory", "ota_0"],
     "rollback_previous": ["factory", "ota_0", "ota_1"],
-    "ota3": ["factory", "ota_0", "ota_1", "ota_0"],
-    "ota4": ["factory", "ota_0", "ota_1", "ota_0", "ota_1"],
-    "factory_reset": ["factory", "ota_0", "ota_1", "ota_0", "ota_1", "ota_0"],
-    "ota5": ["factory", "ota_0", "ota_1", "ota_0", "ota_1", "ota_0", "factory"],
+    "rollback_previous_repeat": ["factory", "ota_0", "ota_1", "ota_0"],
+    "ota3": ["factory", "ota_0", "ota_1", "ota_0", "ota_0"],
+    "ota4": ["factory", "ota_0", "ota_1", "ota_0", "ota_0", "ota_1"],
+    "factory_reset": ["factory", "ota_0", "ota_1", "ota_0", "ota_0", "ota_1", "ota_0"],
+    "ota5": ["factory", "ota_0", "ota_1", "ota_0", "ota_0", "ota_1", "ota_0", "factory"],
 }
 
 FULL_STEP_TRANSPORT = {
@@ -92,6 +95,7 @@ FULL_STEP_TRANSPORT = {
     "ota1": "ble",
     "ota2": "ble",
     "rollback_previous": "ble",
+    "rollback_previous_repeat": "ble",
     "ota3": "ble",
     "ota4": "ble",
     "factory_reset": "ble",
@@ -103,6 +107,7 @@ FAST_STEP_TRANSPORT = {
     "ota1": "ble",
     "ota2": "ble",
     "rollback_previous": "serial_sim",
+    "rollback_previous_repeat": "ble",
     "ota3": "serial_sim",
     "ota4": "serial_sim",
     "factory_reset": "serial_sim",
@@ -189,15 +194,26 @@ def parse_version_string(version_payload: str) -> dict[str, str]:
 
 
 def version_dict_from_hw_component(row: dict[str, str]) -> dict[str, str]:
-    """Map GET_HW_COMPONENT payload to CHECK_VERSION-style SW/Build keys."""
+    """Map GET_HW_COMPONENT to a SW key.
+
+    install_date is not the running image's SOFTWARE_BUILD_DATE. Firmware keeps a
+    previous valid ISO date when the version changes, so it must not be used as Build.
+    """
     version: dict[str, str] = {}
     current = row.get("current_version")
     if current:
         version["SW"] = current
-    install_date = row.get("install_date")
-    if install_date:
-        version["Build"] = install_date
     return version
+
+
+def compiled_version_from_check(version_raw: Optional[str]) -> dict[str, str]:
+    """Parse CHECK_VERSION. Ignore the dummy value left on the characteristic at boot."""
+    if not version_raw:
+        return {}
+    text = version_raw.strip("\x00").strip()
+    if not text or text in {"v1.0", "UNKNOWN"} or "SW:" not in text:
+        return {}
+    return parse_version_string(text)
 
 
 def merge_version_info(*sources: dict[str, str]) -> dict[str, str]:
@@ -210,21 +226,31 @@ def merge_version_info(*sources: dict[str, str]) -> dict[str, str]:
 
 
 async def read_firmware_version(interface: ToiletSystemInterface) -> tuple[Optional[str], dict[str, str]]:
-    """Read firmware SW/Build via OTA CHECK_VERSION, with HW matrix fallback."""
+    """Read SW/Build from CHECK_VERSION.
+
+    Firmware ignores CHECK_VERSION until ENABLE_OTA. The characteristic otherwise
+    stays at the dummy value v1.0.
+    """
     updater = OTAUpdater()
     updater.client = interface.client
     updater.connected = True
     version_raw = await updater.check_version()
-    version = parse_version_string(version_raw or "")
+    version = compiled_version_from_check(version_raw)
+    if not version.get("SW"):
+        updater.log("CHECK_VERSION returned no SW; enabling OTA mode and retrying")
+        updater.connected = True
+        if await updater.enable_ota_mode():
+            version_raw = await updater.check_version()
+            version = compiled_version_from_check(version_raw)
+        else:
+            updater.connected = True
 
     if not version.get("SW"):
         hw_row = await interface.get_hw_component("SOFTWARE_VERSION_NUMBER")
         if hw_row:
             version = merge_version_info(version, version_dict_from_hw_component(hw_row))
             if version.get("SW"):
-                version_raw = (
-                    f"HW:Uninitialized|SW:{version['SW']}|Build:{version.get('Build', '')}"
-                )
+                version_raw = f"HW:Uninitialized|SW:{version['SW']}"
 
     return version_raw, version
 
@@ -728,7 +754,7 @@ class OtaRegressionRunner:
             poll += 1
             await self.heartbeat.maybe_emit_async()
             await self.wait_for_ble()
-            snapshot = await self.collect_diagnostics()
+            snapshot = await self.collect_diagnostics(read_version=False)
             last_snapshot = snapshot
             pending = snapshot["ota_diag"].get("pending", "1")
             streak = int(snapshot["ota_diag"].get("streak", "0") or 0)
@@ -738,6 +764,9 @@ class OtaRegressionRunner:
                 f"ota_diag={snapshot.get('ota_diag_raw', '-')}"
             )
             if pending == "0":
+                version_snapshot = await self.collect_diagnostics(read_version=True)
+                snapshot["version"] = version_snapshot.get("version", {})
+                snapshot["version_raw"] = version_snapshot.get("version_raw")
                 return snapshot
             if streak < OTA_GOOD_BOOT_STREAK_REQUIRED:
                 self.log(
@@ -956,6 +985,30 @@ class OtaRegressionRunner:
                 await interface.disconnect()
         await asyncio.sleep(10.0)
 
+    async def perform_rollback_previous_expect_rejected(self) -> None:
+        """Second previous-slot rollback must be refused once already on the saved slot."""
+        if self.dry_run:
+            self.log("[dry-run] Would send OTA_ROLLBACK_PREVIOUS and expect ALREADY_ON_TARGET")
+            return
+
+        address = await self.ensure_address()
+        await self.wait_for_ble()
+        interface = ToiletSystemInterface()
+        interface.trust_timeout_s = self.trust_timeout_s
+        if not await interface.connect(address, require_trust=True):
+            raise RuntimeError("Failed to connect for second rollback (trust required)")
+        try:
+            response = await interface.ota_rollback_previous_response()
+        finally:
+            if interface.connected:
+                await interface.disconnect()
+        if response != "OTA_ROLLBACK_ERR:ALREADY_ON_TARGET":
+            raise RuntimeError(
+                "Expected OTA_ROLLBACK_ERR:ALREADY_ON_TARGET, "
+                f"observed {response!r}"
+            )
+        self.log(f"Second rollback rejected as expected: {response}")
+
     async def perform_rollback_factory(self) -> None:
         if self.dry_run:
             self.log("[dry-run] Would send OTA_ROLLBACK_FACTORY")
@@ -1038,7 +1091,7 @@ class OtaRegressionRunner:
         if self.auto_build:
             self.log("Mode: AUTO-BUILD (SARAH factory + regA/regB from current source)")
         if self.fast_mode:
-            self.log("Mode: FAST (OTA1/OTA2 BLE; other hops serial-simulated)")
+            self.log("Mode: FAST (OTA1/OTA2 BLE; second rollback BLE; other hops serial-simulated)")
         else:
             self.log("Mode: FULL (all OTA/rollback steps over BLE)")
         if self.start_from != "flash_factory":
@@ -1204,6 +1257,22 @@ class OtaRegressionRunner:
                 self.ota_specs[0],
                 transport=rollback_transport,
                 expect_rollback=(rollback_transport == "ble"),
+            )
+
+        # 4b. Second rollback while already on the saved slot must be rejected.
+        if self.should_run_step("rollback_previous_repeat"):
+            self.log("\n--- Step: Rollback Previous Again ---")
+            repeat_transport = self.step_transport_for("rollback_previous_repeat")
+            self.log(
+                "Second OTA_ROLLBACK_PREVIOUS must return ALREADY_ON_TARGET "
+                "and leave the saved slot running."
+            )
+            await self.perform_rollback_previous_expect_rejected()
+            await self.assert_post_step_state(
+                "rollback_previous_repeat",
+                "ota_0",
+                self.ota_specs[0],
+                transport=repeat_transport,
             )
 
         # 5. OTA3 -> ota_1
@@ -1425,7 +1494,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fast",
         action="store_true",
-        help="Fast mode: OTA1/OTA2 over BLE; OTA3-5, rollback, and factory reset serial-simulated",
+        help="Fast mode: OTA1/OTA2 and the rejected second rollback over BLE; other hops serial-simulated",
     )
     parser.add_argument(
         "--skip-preflight",
