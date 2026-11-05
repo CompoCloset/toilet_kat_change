@@ -341,10 +341,12 @@ def resolve_repo_path(path_text: str) -> Path:
     return path.resolve()
 
 
-def run_auto_build_script(*, skip_firmware_build: bool = False) -> None:
+def run_auto_build_script(*, skip_firmware_build: bool = False, factory_merged: str | None = None) -> None:
     cmd = [sys.executable, str(AUTO_BUILD_SCRIPT)]
     if skip_firmware_build:
         cmd.append("--skip-firmware-build")
+    if factory_merged:
+        cmd.extend(["--factory-merged", factory_merged])
     print("Running OTA regression firmware build...")
     result = subprocess.run(cmd, cwd=REPO_ROOT)
     if result.returncode != 0:
@@ -520,7 +522,7 @@ def run_flash_factory(port: str, factory_bin: Path, boot_slot: str = "factory") 
         raise RuntimeError(f"flash-factory-app.ps1 failed with exit code {result.returncode}")
 
 
-def run_flash_sarah_factory(port: str) -> None:
+def run_flash_sarah_factory(port: str, merged_bin: str | None = None) -> None:
     script = REPO_ROOT / "scripts" / "flash-sarah-factory.ps1"
     cmd = [
         "powershell",
@@ -532,6 +534,8 @@ def run_flash_sarah_factory(port: str) -> None:
         "-Port",
         port,
     ]
+    if merged_bin:
+        cmd.extend(["-MergedBin", merged_bin])
     result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     if result.stdout:
         print(result.stdout)
@@ -575,6 +579,7 @@ class OtaRegressionRunner:
         self.pending_clear_timeout_s = args.pending_clear_timeout
         self.results_dir = Path(args.results_dir)
         self.factory_spec, self.ota_specs, self.manifest_meta = resolve_firmware_specs(args)
+        self.factory_merged = self._resolve_factory_merged(args)
         self.partition_sequence: list[str] = []
         self.steps: list[StepResult] = []
         self.failures: list[str] = []
@@ -604,6 +609,12 @@ class OtaRegressionRunner:
 
     def step_transport_for(self, step_name: str) -> str:
         return self.step_transport[step_name]
+
+    def _resolve_factory_merged(self, args: argparse.Namespace) -> Optional[str]:
+        raw = getattr(args, "factory_merged", None) or self.manifest_meta.get("factory_merged")
+        if not raw:
+            return None
+        return str(resolve_repo_path(str(raw)))
 
     def log(self, message: str) -> None:
         print(message, flush=True)
@@ -707,6 +718,7 @@ class OtaRegressionRunner:
         require_trust: bool = False,
         read_version: bool = True,
         read_version_when_pending_clear: bool = False,
+        read_version_when_diag_empty: bool = False,
     ) -> dict[str, Any]:
         address = await self.ensure_address()
         self.ble_tracker.set("connecting", f"diagnostics -> {address}")
@@ -728,7 +740,12 @@ class OtaRegressionRunner:
             # Read the version before this session ends. Opening COM4 afterwards
             # reboots the ESP32-S3 and drops Bluetooth.
             pending_clear = ota_diag.get("pending") == "0"
-            if read_version or (read_version_when_pending_clear and pending_clear):
+            diag_empty = "pending" not in ota_diag
+            if (
+                read_version
+                or (read_version_when_pending_clear and pending_clear)
+                or (read_version_when_diag_empty and diag_empty)
+            ):
                 version_raw, version = await read_firmware_version(interface)
 
             snapshot = {
@@ -796,7 +813,7 @@ class OtaRegressionRunner:
             self.ble_tracker.disconnected("dev_mode session ended")
         return result
 
-    async def wait_for_pending_clear(self) -> dict[str, Any]:
+    async def wait_for_pending_clear(self, expected_sw: Optional[str] = None) -> dict[str, Any]:
         deadline = time.monotonic() + self.pending_clear_timeout_s
         last_snapshot: dict[str, Any] = {}
         self.heartbeat.set_phase(
@@ -811,10 +828,26 @@ class OtaRegressionRunner:
             snapshot = await self.collect_diagnostics(
                 read_version=False,
                 read_version_when_pending_clear=True,
+                read_version_when_diag_empty=True,
             )
             last_snapshot = snapshot
-            pending = snapshot["ota_diag"].get("pending", "1")
-            streak = int(snapshot["ota_diag"].get("streak", "0") or 0)
+            diag = snapshot["ota_diag"]
+            if "pending" not in diag:
+                sw = snapshot.get("version", {}).get("SW")
+                self.log(
+                    f"[pending poll #{poll}] pending=absent sw={sw!r} "
+                    f"ota_diag={snapshot.get('ota_diag_raw', '-')}"
+                )
+                if expected_sw and expected_sw != "unknown" and sw == expected_sw:
+                    self.log(f"No OTA diag record; running expected image {sw}")
+                    return snapshot
+                self.log(
+                    f"No OTA diag record; observed SW {sw!r}, waiting for {expected_sw}"
+                )
+                await self.heartbeat.sleep(5.0, phase="pending_clear_empty_diag")
+                continue
+            pending = diag["pending"]
+            streak = int(diag.get("streak", "0") or 0)
             usb = self._read_usb_boot()
             self.log(
                 f"[pending poll #{poll}] pending={pending} streak={streak} usb={usb} "
@@ -822,7 +855,7 @@ class OtaRegressionRunner:
             )
             if pending == "0":
                 return snapshot
-            if streak < OTA_GOOD_BOOT_STREAK_REQUIRED:
+            if pending == "1" and streak < OTA_GOOD_BOOT_STREAK_REQUIRED:
                 self.log(
                     f"OTA pending verify active (pending={pending}, streak={streak}); "
                     "triggering extra reboot via esptool..."
@@ -879,7 +912,7 @@ class OtaRegressionRunner:
             else:
                 await self.wait_for_ble()
                 if require_pending_clear:
-                    snapshot = await self.wait_for_pending_clear()
+                    snapshot = await self.wait_for_pending_clear(expected_sw)
                 else:
                     snapshot = await self.collect_diagnostics()
 
@@ -909,9 +942,11 @@ class OtaRegressionRunner:
                         )
 
                 if require_pending_clear:
-                    pending = snapshot.get("ota_diag", {}).get("pending", "1")
-                    if pending != "0":
-                        errors.append(f"Expected pending=0 after OTA verify, observed pending={pending}")
+                    ota_diag = snapshot.get("ota_diag", {})
+                    if "pending" in ota_diag and ota_diag["pending"] != "0":
+                        errors.append(
+                            f"Expected pending=0 after OTA verify, observed pending={ota_diag['pending']}"
+                        )
 
             if not errors:
                 self.partition_sequence.append(observed_partition or expected_partition)
@@ -1025,6 +1060,7 @@ class OtaRegressionRunner:
             self.log("[dry-run] Would send OTA_ROLLBACK_PREVIOUS")
             return
 
+        await self.ensure_dev_mode_enabled()
         address = await self.ensure_address()
         await self.wait_for_ble()
         interface = ToiletSystemInterface()
@@ -1045,6 +1081,7 @@ class OtaRegressionRunner:
             self.log("[dry-run] Would send OTA_ROLLBACK_PREVIOUS and expect ALREADY_ON_TARGET")
             return
 
+        await self.ensure_dev_mode_enabled()
         address = await self.ensure_address()
         await self.wait_for_ble()
         interface = ToiletSystemInterface()
@@ -1068,6 +1105,7 @@ class OtaRegressionRunner:
             self.log("[dry-run] Would send OTA_ROLLBACK_FACTORY")
             return
 
+        await self.ensure_dev_mode_enabled()
         address = await self.ensure_address()
         await self.wait_for_ble()
         interface = ToiletSystemInterface()
@@ -1142,7 +1180,14 @@ class OtaRegressionRunner:
         started_at = utc_now()
         self.log("=" * 72)
         self.log("OTA Partition Regression Harness")
-        if self.auto_build:
+        if self.factory_merged:
+            self.log(f"Mode: FACTORY MERGED ({self.factory_merged})")
+            if self.manifest_meta.get("same_version_roll_forward"):
+                self.log(
+                    "Same-version roll-forward: factory image matches the source version. "
+                    "OTA identity is the -regA/-regB suffix, not a higher semver."
+                )
+        elif self.auto_build:
             self.log("Mode: AUTO-BUILD (SARAH factory + regA/regB from current source)")
         if self.fast_mode:
             self.log("Mode: FAST (OTA1/OTA2 BLE; second rollback BLE; other hops serial-simulated)")
@@ -1252,11 +1297,11 @@ class OtaRegressionRunner:
         # 1. Flash factory
         if self.should_run_step("flash_factory"):
             self.log("\n--- Step: Flash Factory ---")
-            use_sarah_factory = self.auto_build or bool(self.manifest_meta.get("auto_build"))
+            use_full_image = self.factory_merged or self.auto_build or bool(self.manifest_meta.get("auto_build"))
             if not self.dry_run:
                 with self._usb_port("flash factory"):
-                    if use_sarah_factory:
-                        run_flash_sarah_factory(self.port)
+                    if use_full_image:
+                        run_flash_sarah_factory(self.port, self.factory_merged)
                     else:
                         run_flash_factory(self.port, self.factory_spec.path, boot_slot="factory")
                 await self.heartbeat.sleep(12.0, phase="post_flash_factory")
@@ -1433,7 +1478,8 @@ class OtaRegressionRunner:
             lines.append("-" * 90)
             for step in report.steps:
                 sw_pass = (
-                    step.expected_sw is None
+                    not step.expected_sw
+                    or step.expected_sw == "unknown"
                     or (step.observed_sw == step.expected_sw and step.passed)
                 )
                 sw_status = "PASS" if sw_pass else "FAIL"
@@ -1491,7 +1537,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-build",
         action="store_true",
-        help="Build regA/regB from current source, extract SARAH factory, and use generated manifest",
+        help="Build regA/regB from current source, extract the factory image, and use generated manifest",
+    )
+    parser.add_argument(
+        "--factory-merged",
+        help="16MB merged factory image to flash at 0x0 instead of the SARAH image",
     )
     parser.add_argument("--manifest", help="JSON manifest with factory + 5 OTA binary specs")
     parser.add_argument("--factory-bin", help="Factory firmware .bin (required without --manifest)")
@@ -1591,7 +1641,10 @@ async def async_main() -> int:
             print(f"Auto-build: refreshing manifest build dates from binaries ({DEFAULT_AUTO_MANIFEST})")
             refresh_manifest_build_dates(DEFAULT_AUTO_MANIFEST)
         else:
-            run_auto_build_script(skip_firmware_build=False)
+            run_auto_build_script(
+                skip_firmware_build=False,
+                factory_merged=args.factory_merged,
+            )
         args.manifest = str(DEFAULT_AUTO_MANIFEST)
     elif not args.manifest and not args.factory_bin:
         parser.error("Provide --auto-build, --manifest, or --factory-bin")

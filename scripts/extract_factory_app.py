@@ -5,8 +5,14 @@ from __future__ import annotations
 
 import argparse
 import re
-import struct
+import sys
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from ota_partition_report import detect_software_version  # noqa: E402
 
 FACTORY_OFFSET = 0x10000
 FACTORY_SIZE = 0x480000
@@ -24,20 +30,19 @@ def extract_region(data: bytes, offset: int, size: int) -> bytes:
     return data[offset:end]
 
 
-def probe_version_strings(app_data: bytes) -> list[str]:
-    """Find likely SOFTWARE_VERSION_NUMBER literals embedded in the app image."""
-    text = app_data.decode("latin-1", errors="ignore")
-    candidates = set(re.findall(r"\d+\.\d+\.\d+\.\d+(?:-[A-Za-z0-9]+)?", text))
-    return sorted(candidates, key=len, reverse=True)
+_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9]+)?")
 
 
-def pick_best_version(candidates: list[str]) -> str | None:
-    if not candidates:
-        return None
-    for candidate in candidates:
-        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", candidate):
-            return candidate
-    return candidates[0]
+def detect_factory_version(app_data: bytes) -> str | None:
+    """Read the software version embedded in a factory app image.
+
+    esp_app_desc on SARAH is a git hash. The readable version is the
+    three-part SOFTWARE_VERSION_NUMBER literal, for example 3.0.0.
+    """
+    detected = detect_software_version(app_data)
+    if _VERSION_RE.fullmatch(detected or ""):
+        return detected
+    return None
 
 
 def validate_app_image(app_data: bytes) -> None:
@@ -70,8 +75,7 @@ def main() -> int:
     boot_path.write_bytes(bootloader)
     part_path.write_bytes(partitions)
 
-    version_candidates = probe_version_strings(app_data)
-    detected_version = pick_best_version(version_candidates)
+    detected_version = detect_factory_version(app_data)
 
     print(f"Wrote factory app ({len(app_data)} bytes) -> {app_path}")
     print(f"Wrote bootloader ({len(bootloader)} bytes) -> {boot_path}")

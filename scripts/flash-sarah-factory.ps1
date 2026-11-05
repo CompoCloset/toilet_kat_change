@@ -19,7 +19,7 @@ if ($size -ne 0x1000000) {
     throw "SARAH merged image must be 16MB (16777216 bytes), got $size"
 }
 
-Write-Host "Flashing full SARAH factory image ($size bytes) on $Port..."
+Write-Host "Flashing full merged factory image ($size bytes) on $Port..."
 python -m esptool --chip esp32s3 --port $Port --baud 921600 write-flash `
     --flash-size 16MB --erase-all 0x0 $MergedBin
 if ($LASTEXITCODE -ne 0) {
@@ -37,4 +37,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "read_partitions.py failed with exit code $LASTEXITCODE"
 }
 
-Write-Host "SARAH factory flashed."
+Write-Host "Merged factory image flashed."

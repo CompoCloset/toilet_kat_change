@@ -36,6 +36,35 @@ Use `--auto-build` to test **current source code** instead of hand-picked manife
 
 `{base}` is parsed from `toilet_kat_change/toilet_kat_change.ino` at build time (e.g. `4.0.17.1` → `4.0.17.1-regA` / `4.0.17.1-regB`).
 
+## Release rollout (`--factory-merged`)
+
+Before shipping a firmware version, save a 16 MB merged image and run this regression from that image, not from SARAH. The flash writes the whole chip (`--erase-all` at `0x0`), including blank NVS and blank OTA slots, so the board matches a factory flash of that release.
+
+1. Build with `scripts/build-firmware.ps1` (no version override).
+2. Save the compiler `toilet_kat_change.ino.merged.bin`, padded with `0xFF` to 16 MB if needed, as `FACTORY_BINARIES/YYYYMMDD_X.Y.Z.bin`.
+3. Run fast mode, then full mode, both with `--factory-merged` pointing at that file.
+
+```powershell
+python scripts/run_ota_regression.py `
+  --port COM4 `
+  --address 28:84:85:82:95:61 `
+  --auto-build `
+  --factory-merged FACTORY_BINARIES\20261105_4.3.3.bin `
+  --fast
+
+python scripts/run_ota_regression.py `
+  --port COM4 `
+  --address 28:84:85:82:95:61 `
+  --auto-build `
+  --factory-merged FACTORY_BINARIES\20261105_4.3.3.bin
+```
+
+Fast mode is the iteration pass. Full mode (no `--fast`) is the release gate: every OTA and the first rollback go over BLE.
+
+The `4.3.3` rollout is a same-version roll-forward. The factory image and the OTA builds come from the same source, so there is no newer product version. The harness logs that and continues. Slot identity is the suffix: factory `4.3.3`, then `4.3.3-regA` / `4.3.3-regB`. A later release whose merged image is older than the source version is a normal roll-forward and needs no extra flag.
+
+The SARAH `--auto-build` path remains the test that starts from the original factory board image.
+
 | Step | Partition | Binary | Expected `SW` |
 |------|-----------|--------|---------------|
 | Flash Factory | `factory` | full SARAH merged image | SARAH version (read from bin) |

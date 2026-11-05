@@ -327,12 +327,12 @@ struct HWCFGConfigStore {
 #  if __has_include("software_version_build.h")
 #    include "software_version_build.h"
 #  else
-const char* SOFTWARE_VERSION_NUMBER = "4.3.2";
+const char* SOFTWARE_VERSION_NUMBER = "4.3.3";
 const char* FACTORY_SOFTWARE_DATE = "2026-11-05";
 const char* SOFTWARE_BUILD_DATE = "2026-11-05";  // YYYY-MM-DD — update with each build
 #  endif
 #else
-const char* SOFTWARE_VERSION_NUMBER = "4.3.2";
+const char* SOFTWARE_VERSION_NUMBER = "4.3.3";
 const char* FACTORY_SOFTWARE_DATE = "2026-11-05";
 const char* SOFTWARE_BUILD_DATE = "2026-11-05";  // YYYY-MM-DD — update with each build
 #endif
@@ -5356,6 +5356,12 @@ static bool otaIsAbnormalResetReason(esp_reset_reason_t reason) {
          reason == ESP_RST_BROWNOUT || reason == ESP_RST_SDIO || reason == ESP_RST_INT_WDT;
 }
 
+// NVS key names are limited to NVS_KEY_NAME_MAX_SIZE-1 characters.
+static constexpr char NVS_KEY_RB_SUBTYPE[] = "rb_subtype";
+static constexpr char NVS_KEY_TAIL_MIRRORED[] = "tail_mirrored";
+static_assert(sizeof(NVS_KEY_RB_SUBTYPE) <= NVS_KEY_NAME_MAX_SIZE, "rb_subtype exceeds NVS key limit");
+static_assert(sizeof(NVS_KEY_TAIL_MIRRORED) <= NVS_KEY_NAME_MAX_SIZE, "tail_mirrored exceeds NVS key limit");
+
 static void loadOtaDiag(OtaDiagStore& diag) {
   initDefaultOtaDiag(diag);
   nvs_handle_t nvs_handle;
@@ -5370,7 +5376,7 @@ static void loadOtaDiag(OtaDiagStore& diag) {
   }
 
   uint8_t rollbackSubtype = OTA_SUBTYPE_UNSET;
-  if (nvs_get_u8(nvs_handle, "rollback_subtype", &rollbackSubtype) == ESP_OK) {
+  if (nvs_get_u8(nvs_handle, NVS_KEY_RB_SUBTYPE, &rollbackSubtype) == ESP_OK) {
     (void)rollbackSubtype;
   }
 
@@ -5379,7 +5385,7 @@ static void loadOtaDiag(OtaDiagStore& diag) {
     diag.log_tail_len = tailLen;
   }
   uint8_t mirrored = 0;
-  if (nvs_get_u8(nvs_handle, "log_tail_mirrored", &mirrored) == ESP_OK) {
+  if (nvs_get_u8(nvs_handle, NVS_KEY_TAIL_MIRRORED, &mirrored) == ESP_OK) {
     diag.log_tail_mirrored = mirrored;
   }
 
@@ -5388,25 +5394,31 @@ static void loadOtaDiag(OtaDiagStore& diag) {
 
 static bool saveOtaDiag(const OtaDiagStore& diag) {
   nvs_handle_t nvs_handle;
-  if (nvs_open("ota", NVS_READWRITE, &nvs_handle) != ESP_OK) {
+  esp_err_t err = nvs_open("ota", NVS_READWRITE, &nvs_handle);
+  if (err != ESP_OK) {
+    Serial.printf("ERROR: Failed to store ota diag: %s\n", esp_err_to_name(err));
     return false;
   }
 
   OtaDiagStore toWrite = diag;
   toWrite.magic = OTA_DIAG_MAGIC;
   toWrite.schema = OTA_DIAG_SCHEMA;
-  esp_err_t err = nvs_set_blob(nvs_handle, "ota_diag", &toWrite, sizeof(toWrite));
+  err = nvs_set_blob(nvs_handle, "ota_diag", &toWrite, sizeof(toWrite));
   if (err == ESP_OK) {
     err = nvs_set_u16(nvs_handle, "log_tail_len", toWrite.log_tail_len);
   }
   if (err == ESP_OK) {
-    err = nvs_set_u8(nvs_handle, "log_tail_mirrored", toWrite.log_tail_mirrored);
+    err = nvs_set_u8(nvs_handle, NVS_KEY_TAIL_MIRRORED, toWrite.log_tail_mirrored);
   }
   if (err == ESP_OK) {
     err = nvs_commit(nvs_handle);
   }
   nvs_close(nvs_handle);
-  return err == ESP_OK;
+  if (err != ESP_OK) {
+    Serial.printf("ERROR: Failed to store ota diag: %s\n", esp_err_to_name(err));
+    return false;
+  }
+  return true;
 }
 
 bool isOnOtaTargetPartition() {
@@ -5450,7 +5462,7 @@ static bool captureSpiffsLogTailToNvs(OtaDiagStore& diag) {
     nvs_erase_key(nvs_handle, "ota_log_tail");
   }
   nvs_set_u16(nvs_handle, "log_tail_len", diag.log_tail_len);
-  nvs_set_u8(nvs_handle, "log_tail_mirrored", 0);
+  nvs_set_u8(nvs_handle, NVS_KEY_TAIL_MIRRORED, 0);
   nvs_commit(nvs_handle);
   nvs_close(nvs_handle);
   return true;
@@ -5690,10 +5702,10 @@ static bool writeRollbackSubtype(uint8_t subtype) {
       return false;
     }
 
-    err = nvs_set_u8(nvs_handle, "rollback_subtype", subtype);
+    err = nvs_set_u8(nvs_handle, NVS_KEY_RB_SUBTYPE, subtype);
     if (err == ESP_ERR_NVS_TYPE_MISMATCH) {
-      nvs_erase_key(nvs_handle, "rollback_subtype");
-      err = nvs_set_u8(nvs_handle, "rollback_subtype", subtype);
+      nvs_erase_key(nvs_handle, NVS_KEY_RB_SUBTYPE);
+      err = nvs_set_u8(nvs_handle, NVS_KEY_RB_SUBTYPE, subtype);
     }
     if (err == ESP_OK) {
       err = nvs_set_u8(nvs_handle, "rollback_flag", 0);
@@ -5768,7 +5780,7 @@ static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternate
   nvs_handle_t nvs_handle;
   esp_err_t readErr = ESP_ERR_NVS_NOT_FOUND;
   if (nvs_open("ota", NVS_READONLY, &nvs_handle) == ESP_OK) {
-    readErr = nvs_get_u8(nvs_handle, "rollback_subtype", &rollback_subtype);
+    readErr = nvs_get_u8(nvs_handle, NVS_KEY_RB_SUBTYPE, &rollback_subtype);
     if (readErr == ESP_OK) {
       rollback_partition = findPartitionBySubtype(rollback_subtype);
     }

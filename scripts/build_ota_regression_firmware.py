@@ -88,19 +88,21 @@ def run_build() -> None:
         raise RuntimeError(f"Build output missing: {BUILD_OUTPUT}")
 
 
-def extract_sarah_artifacts() -> dict[str, str | None]:
-    if not SARAH_MERGED.exists():
-        raise FileNotFoundError(f"SARAH merged image not found: {SARAH_MERGED}")
+def extract_merged_factory(merged: Path, label: str) -> dict[str, str | None]:
+    if not merged.exists():
+        raise FileNotFoundError(f"Merged factory image not found: {merged}")
+    if merged.stat().st_size != 0x1000000:
+        raise ValueError(f"Merged factory image must be 16MB, got {merged.stat().st_size}: {merged}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
         str(EXTRACT_SCRIPT),
-        str(SARAH_MERGED),
+        str(merged),
         "--out-dir",
         str(OUT_DIR),
         "--label",
-        "sarah",
+        label,
     ]
     result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     if result.stdout:
@@ -114,10 +116,18 @@ def extract_sarah_artifacts() -> dict[str, str | None]:
     for line in (result.stdout or "").splitlines():
         if line.startswith("Detected version string:"):
             detected = line.split(":", 1)[1].strip()
-    factory_app = OUT_DIR / "sarah_factory_app.bin"
-    factory_copy = OUT_DIR / "factory_sarah.bin"
+    factory_app = OUT_DIR / f"{label}_factory_app.bin"
+    factory_copy = OUT_DIR / f"factory_{label}.bin"
     shutil.copy2(factory_app, factory_copy)
-    return {"factory_version": detected, "factory_path": str(factory_copy)}
+    return {
+        "factory_version": detected,
+        "factory_path": str(factory_copy),
+        "factory_merged": str(merged.resolve()),
+    }
+
+
+def extract_sarah_artifacts() -> dict[str, str | None]:
+    return extract_merged_factory(SARAH_MERGED, "sarah")
 
 
 def resolve_manifest_path(path_text: str) -> Path:
@@ -210,11 +220,15 @@ def emit_manifest(
     factory_path = Path(factory_info["factory_path"])
     factory_sw = factory_info.get("factory_version") or "unknown"
     factory_build = factory_info.get("factory_build") or build_date
+    factory_merged = factory_info.get("factory_merged") or str(SARAH_MERGED)
+    same_version = bool(factory_sw) and factory_sw == base_version
     manifest = {
         "auto_build": True,
         "base_version": base_version,
         "build_date": build_date,
         "sarah_merged": str(SARAH_MERGED),
+        "factory_merged": factory_merged,
+        "same_version_roll_forward": same_version,
         "factory": {
             "path": str(factory_path.relative_to(REPO_ROOT)).replace("\\", "/"),
             "expected_sw": factory_sw,
@@ -266,6 +280,10 @@ def main() -> int:
         action="store_true",
         help="Update manifest.json expected_build fields from existing binaries (no build/extract)",
     )
+    parser.add_argument(
+        "--factory-merged",
+        help="16MB merged factory image to extract and flash instead of SARAH",
+    )
     args = parser.parse_args()
 
     if args.refresh_manifest_only:
@@ -288,8 +306,20 @@ def main() -> int:
     print(f"Compile build date: {compile_build_date}")
     print(f"OTA variants: {reg_a_version}, {reg_b_version}")
 
-    factory_info = extract_sarah_artifacts()
-    factory_info["factory_path"] = str(OUT_DIR / "factory_sarah.bin")
+    if args.factory_merged:
+        merged = resolve_manifest_path(args.factory_merged)
+        label = merged.stem.replace(".", "_")
+        print(f"Factory merged image: {merged}")
+        factory_info = extract_merged_factory(merged, label)
+    else:
+        factory_info = extract_sarah_artifacts()
+    factory_version = factory_info.get("factory_version")
+    if factory_version and factory_version == base_version:
+        print(
+            "Same-version roll-forward: factory image matches the source version. "
+            "OTA identity is the -regA/-regB suffix, not a higher semver."
+        )
+    factory_info["factory_path"] = str(factory_info["factory_path"])
     factory_path = Path(factory_info["factory_path"])
     factory_info["factory_build"] = (
         detect_firmware_build_date(factory_path, expected_sw=factory_info.get("factory_version"))
