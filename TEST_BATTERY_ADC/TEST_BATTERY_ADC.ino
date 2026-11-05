@@ -37,11 +37,11 @@ const float CHARGE_DROP_RESET_MV = 5.0f;
 
 // Full-anchor learn window (matches toilet_kat_change.ino)
 constexpr int BATT_FULL_LEARN_WINDOW = 6;
-constexpr float LEARN_STDEV_MAX_MV = 1.0f;  // reject jagged windows; candidate is mean
+constexpr float LEARN_STDEV_MAX_MV = 1.0f;  // reject jagged windows; compare the mean
 constexpr float LEARN_MIN_DELTA_MV = 0.1f;  // ignore sub-0.1 mV float noise raises
+constexpr float LEARN_ANCHOR_PAD_MV = 1.5f;  // stored above the mean; not added to the comparison
 constexpr float kVFullMvSeed = 1550.0f;
 constexpr float VFULL_MV_MIN = 1500.0f;
-constexpr float kVFullMvMax = 1920.0f;
 
 struct ChargeSample {
   float mv;
@@ -72,6 +72,11 @@ static float battFullLearnWindow[BATT_FULL_LEARN_WINDOW];
 static int battFullLearnCount = 0;
 static int battFullLearnHead = 0;
 static float vFullMv = kVFullMvSeed;
+static WindowStats lastLearnStats = {};
+static float lastLearnCandidate = 0.0f;
+static bool lastLearnGateOk = false;
+static bool lastLearnWouldRaise = false;
+static float lastLearnStep = 0.0f;
 
 int batteryChargeLevelFromVoltage(float batteryVoltage) {
   if (batteryVoltage >= 12.6f) {
@@ -259,6 +264,9 @@ static float chargeSlopeMvPerMin() {
   return (float)(((double)n * sumTV - sumT * sumV) / denom);
 }
 
+static bool updateBattFullLearn(float mvCal, WindowStats* outStats, float* outCandidate,
+                                bool* outGateOk, bool* outWouldRaise, float* outStep);
+
 // Update isCharging from gradual VMON_CAL drift (noise-tolerant).
 // Always recomputes rise/slope for logging when history allows; gate still uses firmware rules.
 static void updateChargingDetection(float mvCal) {
@@ -283,6 +291,10 @@ static void updateChargingDetection(float mvCal) {
   hasLastChargeMv = true;
   lastSmoothedRiseMv = 0.0f;
   lastSlopeMvPerMin = 0.0f;
+
+  // Firmware learns here, before this sample updates isCharging.
+  updateBattFullLearn(mvCal, &lastLearnStats, &lastLearnCandidate, &lastLearnGateOk,
+                      &lastLearnWouldRaise, &lastLearnStep);
 
   if (chargeHistoryCount < 2) {
     return;
@@ -388,13 +400,10 @@ static bool updateBattFullLearn(float mvCal, WindowStats* outStats, float* outCa
     return false;
   }
 
-  // Stable window: jump to the mean (matches firmware). outStep is the applied delta.
-  float next = mean;
+  // Stable mean cleared the stored anchor: store mean + pad (matches firmware).
+  float next = mean + LEARN_ANCHOR_PAD_MV;
   if (next < VFULL_MV_MIN) {
     next = VFULL_MV_MIN;
-  }
-  if (next > kVFullMvMax) {
-    next = kVFullMvMax;
   }
   if (!(next > vFullMv)) {
     return false;
@@ -404,8 +413,8 @@ static bool updateBattFullLearn(float mvCal, WindowStats* outStats, float* outCa
   vFullMv = next;
   *outStep = vFullMv - oldV;
   Serial.printf(
-      "[batt_full_learn] vFullMv %.1f->%.1f delta=%.1f candidate=%.1f stdev=%.3f\n",
-      oldV, vFullMv, *outStep, mean, stdev);
+      "[batt_full_learn] vFullMv %.1f->%.1f delta=%.1f mean=%.1f pad=%.1f stdev=%.3f\n",
+      oldV, vFullMv, *outStep, mean, LEARN_ANCHOR_PAD_MV, stdev);
   return true;
 }
 
@@ -436,10 +445,11 @@ void setup() {
       (unsigned long)(CHARGE_MIN_SPAN_MS / 1000UL),
       CHARGE_DROP_RESET_MV);
   Serial.printf(
-      "LEARN gate: n==%d, stdev<=%.1fmV, candidate=mean, requires charging, "
-      "jump to mean if delta>%.1fmV\n",
+      "LEARN gate: n==%d, stdev<=%.1fmV, compare=mean, requires charging, "
+      "store mean+%.1fmV if delta>%.1fmV\n",
       BATT_FULL_LEARN_WINDOW,
       LEARN_STDEV_MAX_MV,
+      LEARN_ANCHOR_PAD_MV,
       LEARN_MIN_DELTA_MV);
   Serial.println(
       F("Columns: SAMPLE / CHARGE / LEARN  (deltaMv = rise+/fall- vs previous sample)"));
@@ -452,12 +462,10 @@ void loop() {
 
   updateChargingDetection(vmonMvCal);
 
-  WindowStats learnStats = {};
-  float candidate = 0.0f;
-  bool gateOk = false;
-  bool wouldRaise = false;
-  float step = 0.0f;
-  updateBattFullLearn(vmonMvCal, &learnStats, &candidate, &gateOk, &wouldRaise, &step);
+  WindowStats learnStats = lastLearnStats;
+  bool gateOk = lastLearnGateOk;
+  bool wouldRaise = lastLearnWouldRaise;
+  float step = lastLearnStep;
 
   WindowStats chargeStats = chargeHistoryStats();
 
@@ -482,9 +490,11 @@ void loop() {
 
   // Per-sample raw observation
   Serial.printf(
-      "[SAMPLE] mv=%.2f V=%.3f quad=%.2fV lvl=%d%% deltaMv=%+.2f (%s) "
-      "ADC=%.1f linearBat=%.2fV scaleBat=%.2fV\n",
+      "[SAMPLE] mv=%.2f vFullMv=%.2f aboveFull=%+.2f V=%.3f quad=%.2fV lvl=%d%% "
+      "deltaMv=%+.2f (%s) ADC=%.1f linearBat=%.2fV scaleBat=%.2fV\n",
       vmonMvCal,
+      vFullMv,
+      vmonMvCal - vFullMv,
       vmonCal,
       batteryQuad,
       level,
@@ -518,21 +528,22 @@ void loop() {
 
   // batt_full_learn short window + gate math (candidate = mean, charge-gated)
   Serial.printf(
-      "[LEARN] n=%d charging=%d | min=%.2f max=%.2f mean=%.2f stdev=%.3f (max=%.1f) range=%.2f | "
-      "candidate=%.2f gate=%d wouldRaise=%d step=%.1f vFullMv=%.1f\n",
+      "[LEARN] n=%d charging=%d | min=%.2f max=%.2f mean=%.2f vFullMv=%.2f "
+      "mean-full=%+.2f stdev=%.3f (max=%.1f) range=%.2f | "
+      "gate=%d wouldRaise=%d step=%.1f\n",
       learnStats.n,
       isCharging ? 1 : 0,
       learnStats.minMv,
       learnStats.maxMv,
       learnStats.meanMv,
+      vFullMv,
+      learnStats.meanMv - vFullMv,
       learnStats.stdevMv,
       LEARN_STDEV_MAX_MV,
       learnStats.rangeMv,
-      candidate,
       gateOk ? 1 : 0,
       wouldRaise ? 1 : 0,
-      step,
-      vFullMv);
+      step);
 
   Serial.println();
   delay(POLL_INTERVAL_MS);

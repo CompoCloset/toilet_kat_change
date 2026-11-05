@@ -456,7 +456,7 @@ When **DEV mode is on**, the same dual-button hold gesture does **not** turn DEV
 
 **Behavior**:
 
-- **Not flushing**: short dual press shows battery level on the LEDs and starts the dual-button hold timer. It does not call `stopEverything()`. Homing, manual feed, and jam reverse keep running. LEDs auto-clear a few seconds after release.
+- **Not flushing**: short dual press shows battery level on the LEDs and starts the dual-button hold timer. It does not call `stopEverything()`. Homing and jam reverse keep running. An in-progress manual feed is stopped first, including the sealer fan, so the heater load test is not stacked on the auger and releasing the buttons cannot leave M2 running. LEDs auto-clear a few seconds after release.
 - **Flushing**: short dual press runs flush cancel recovery via `acceptFlushCancel()`, not `stopEverything()`.
 - **DEV off**, 10-second continuous dual hold: enable DEV mode (persisted in NVS); from the battery-read path (`dualButtonHoldActive`); blocked while an OTA window is active or a flush is running.
 - **DEV on**, 10-second hold: warning only (no DEV toggle off).
@@ -523,13 +523,14 @@ Board-to-board VMON readings at the same pack voltage vary, largely because of Z
 **Stability gate**:
 
 - Keep a 6-sample window of idle means.
-- `candidate = mean(window)`; require a full window (`n == 6`) and `stdev <= LEARN_STDEV_MAX_MV` (1.0 mV).
+- Compare `mean(window)` to the stored anchor; require a full window (`n == 6`) and `stdev <= LEARN_STDEV_MAX_MV` (1.0 mV).
 - **Require `isCharging`**: raise only while charging is latched. When float clears charging (rise/slope ≤ 0), learn stops; `vFullMv` should already have tracked up during the charge window.
 
 **Ratchet**:
 
-- Raise only when `isCharging` and `candidate − vFullMv > LEARN_MIN_DELTA_MV` (0.1 mV) so float/display-noise micro-raises do not persist or spam logs.
-- When that gate passes, set `vFullMv` to `candidate` in one step. The 6-sample stdev check is the stability gate, so there is no per-update millivolt cap.
+- Raise only when `isCharging` and `mean − vFullMv > LEARN_MIN_DELTA_MV` (0.1 mV). The comparison uses the plain mean. `vFullMv` already includes the store pad, so a later mean must clear that padded anchor.
+- When that gate passes, set `vFullMv` to `mean + LEARN_ANCHOR_PAD_MV` (1.5 mV) in one step. The pad is applied only on store, not added again on the next comparison. The 6-sample stdev check is the stability gate, so there is no per-update millivolt cap.
+- An anchor already saved without the pad is left as-is until the next accepted raise. It does not get 1.5 mV added on boot.
 - Floor at `VFULL_MV_MIN` (1500) only — **no soft upper clamp**; persist learned state; emit `[batt_full_learn] ...` on USB Serial + BLE serial (`SerialBLE_println`) and append the same line to `GET_LOGS`.
 - Never auto-lower for normal noise. If learned `vFullMv` overshoots in the field, reset via BLE `RESET_BATTERY_CAL` (dev mode).
 
@@ -557,7 +558,7 @@ Board-to-board VMON readings at the same pack voltage vary, largely because of Z
 - **Slow-only step**: a former 25 mV "fast" window (first N flushes) raced the anchor on boot; always use 3 mV so calibration crawls during a real charge session.
 - **Charge gate**: learn follows the pack up while `isCharging` is true; after clear (flat/falling), no further raises — accepted tradeoff vs learning at pure float without a charger-detect GPIO.
 - **Monotonic learn**: discharge, load sag, and brief ADC glitches must not pull the full point down.
-- **Mean over max**: with ~0.3–0.5 mV sample noise, `max(window)` is always an outlier above the mean, so a `(max − mean) ≤ stdev` gate systematically rejects stable windows. Using `mean` plus an absolute `stdev ≤ 1.0 mV` ceiling accepts tight plateaus and dilutes single-sample spikes (~1/6).
-- **Minimum raise delta**: require `delta > 0.1 mV` before EEPROM write / `[batt_full_learn]` log so sub-LSB float wobble (e.g. 1799.93 vs 1799.9) cannot spam no-op "updates".
+- **Mean over max**: with ~0.5–0.6 mV sample noise on a flat pack (about 1.8 mV peak to peak, window max about 0.6–1.1 mV above the mean), `max(window)` is the noisy high of that window. The comparison stays on the mean. Storing `mean + 1.5 mV` puts the anchor above that noise, so a later single sample usually stays under `vFullMv` and the corrected idle voltage stays at or under 12.6 V instead of tripping the 79% / still-calibrating cap. The next plain mean has to rise by about 1.6 mV before another raise is accepted, which this noise does not do.
+- **Minimum raise delta**: require `mean − vFullMv > 0.1 mV` before EEPROM write / `[batt_full_learn]` log. The 1.5 mV pad is not part of this comparison.
 - **Seed/max as BLE params**: service can tune initial optimism and hard ceiling without a rebuild; learned peak stays independent of material CSV so bag changes do not wipe board calibration.
 - **mV learn + volt offset**: learn the divider error in VMON mV; correct displayed/assess volts with an additive offset so learned full ↔ 12.6 V without rewriting material `battMvCalC` or stretching sag.

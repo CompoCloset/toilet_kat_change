@@ -92,14 +92,15 @@ constexpr float kBattMvCalA = 0.000009091f;
 constexpr float kBattMvCalB = -0.019148f;
 constexpr float kBattMvCalC = 17.397361f;
 // Full-anchor ratchet (learned vFullMv in VMON_CAL mV); seed is BLE/material param.
-// A stable charging window jumps vFullMv to the window mean (upward only).
+// A stable charging window stores the window mean plus LEARN_ANCHOR_PAD_MV (upward only).
 constexpr float kVFullMvSeed = 1550.0f;
 constexpr float VFULL_MV_MIN = 1500.0f;
 constexpr float VFULL_MV_HARD_MAX = 2200.0f;  // seed write sanity only; learned value has no soft max
 constexpr unsigned long FULL_POST_LOAD_SETTLE_MS = 60000UL;
 constexpr int BATT_FULL_LEARN_WINDOW = 6;
-constexpr float LEARN_STDEV_MAX_MV = 1.0f;  // reject jagged windows; candidate is mean
+constexpr float LEARN_STDEV_MAX_MV = 1.0f;  // reject jagged windows; compare the mean
 constexpr float LEARN_MIN_DELTA_MV = 0.1f;  // ignore sub-0.1 mV float noise raises
+constexpr float LEARN_ANCHOR_PAD_MV = 1.5f;  // stored above the mean so noise stays under 12.6 V
 
 // Custom I2C instance
 TwoWire myI2C = TwoWire(0);
@@ -326,14 +327,14 @@ struct HWCFGConfigStore {
 #  if __has_include("software_version_build.h")
 #    include "software_version_build.h"
 #  else
-const char* SOFTWARE_VERSION_NUMBER = "4.3.0";
-const char* FACTORY_SOFTWARE_DATE = "2026-10-29";
-const char* SOFTWARE_BUILD_DATE = "2026-10-29";  // YYYY-MM-DD — update with each build
+const char* SOFTWARE_VERSION_NUMBER = "4.3.1";
+const char* FACTORY_SOFTWARE_DATE = "2026-11-05";
+const char* SOFTWARE_BUILD_DATE = "2026-11-05";  // YYYY-MM-DD — update with each build
 #  endif
 #else
-const char* SOFTWARE_VERSION_NUMBER = "4.3.0";
-const char* FACTORY_SOFTWARE_DATE = "2026-10-29";
-const char* SOFTWARE_BUILD_DATE = "2026-10-29";  // YYYY-MM-DD — update with each build
+const char* SOFTWARE_VERSION_NUMBER = "4.3.1";
+const char* FACTORY_SOFTWARE_DATE = "2026-11-05";
+const char* SOFTWARE_BUILD_DATE = "2026-11-05";  // YYYY-MM-DD — update with each build
 #endif
 
 // Forward declarations
@@ -9925,15 +9926,16 @@ void onIdleBattMvSample(float mvCal, unsigned long now) {
     return;
   }
 
+  // Compare the unpadded mean to the stored anchor (the anchor already includes the pad).
   const float candidate = mean;
   float delta = candidate - vFullMv;
   if (!(delta > LEARN_MIN_DELTA_MV)) {
     return;
   }
 
-  // Window already passed the stdev gate: take the stable mean in one step.
+  // Stable mean cleared the stored anchor: store it plus the noise pad, in one step.
   float oldV = vFullMv;
-  float next = candidate;
+  float next = candidate + LEARN_ANCHOR_PAD_MV;
   if (next < VFULL_MV_MIN) {
     next = VFULL_MV_MIN;
   }
@@ -9944,10 +9946,11 @@ void onIdleBattMvSample(float mvCal, unsigned long now) {
   vFullMv = next;
   saveBattFullLearnToEEPROM();
 
-  char msg[128];
+  char msg[160];
   snprintf(msg, sizeof(msg),
-           "vFullMv %.1f->%.1f delta=%.1f flush=%lu",
-           oldV, vFullMv, vFullMv - oldV, (unsigned long)lifetimeFlushCount);
+           "vFullMv %.1f->%.1f delta=%.1f mean=%.1f pad=%.1f flush=%lu",
+           oldV, vFullMv, vFullMv - oldV, candidate, LEARN_ANCHOR_PAD_MV,
+           (unsigned long)lifetimeFlushCount);
   logBattFullLearnUpdate(msg, mvCal);
 }
 
