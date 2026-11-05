@@ -30,7 +30,7 @@ Arduino ESP32 core and `esptool` are also used by the flash scripts.
 
 Use `--auto-build` to test **current source code** instead of hand-picked manifest binaries. Each run:
 
-1. Extracts and flashes **SARAH factory** as the baseline partition image
+1. Writes the full **SARAH merged image** (`FACTORY_BINARIES/SARAH_toilet_kat_change.ino.merged.bin`) so flash matches a factory board, including blank NVS
 2. Builds two OTA variants from the current tree with distinct version suffixes (`{base}-regA`, `{base}-regB`)
 3. Runs the partition sequence and asserts **version evolution** at every hop
 
@@ -38,7 +38,7 @@ Use `--auto-build` to test **current source code** instead of hand-picked manife
 
 | Step | Partition | Binary | Expected `SW` |
 |------|-----------|--------|---------------|
-| Flash Factory | `factory` | SARAH extracted app | SARAH version (read from bin) |
+| Flash Factory | `factory` | full SARAH merged image | SARAH version (read from bin) |
 | OTA1 | `ota_0` | regA build | `{base}-regA` |
 | OTA2 | `ota_1` | regB build | `{base}-regB` |
 | Rollback | `ota_0` | (no flash) | `{base}-regA` |
@@ -110,7 +110,7 @@ Step mapping:
 
 | Step | Action | Expected boot partition | Expected version source |
 |------|--------|----------------------|-------------------------|
-| Flash Factory | USB flash (SARAH when `--auto-build`) | `factory` | factory binary |
+| Flash Factory | USB write of the full SARAH merged image | `factory` | factory binary |
 | OTA1 | BLE OTA | `ota_0` | OTA1 binary |
 | OTA2 | BLE OTA | `ota_1` | OTA2 binary |
 | Rollback | BLE `OTA_ROLLBACK_PREVIOUS` / serial sim (`--fast`) | `ota_0` | OTA1 binary |
@@ -126,7 +126,7 @@ Use fast mode for day-to-day iteration. It keeps the same partition sequence but
 
 | Step | Full mode | Fast mode |
 |------|-----------|-----------|
-| Flash Factory | USB (SARAH with `--auto-build`) | USB |
+| Flash Factory | USB full SARAH merged image | USB full SARAH merged image |
 | OTA1 | BLE | BLE |
 | OTA2 | BLE | BLE |
 | Rollback | BLE `OTA_ROLLBACK_PREVIOUS` | USB otadata boot to `ota_0` |

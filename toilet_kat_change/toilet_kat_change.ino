@@ -5664,22 +5664,62 @@ static const esp_partition_t* findAlternateOtaSlotPartition() {
   return alt;
 }
 
+static bool nvsNeedsSpace(esp_err_t err) {
+  return err == ESP_ERR_NVS_NOT_ENOUGH_SPACE || err == ESP_ERR_NVS_NO_FREE_PAGES;
+}
+
+// The 1 KB mirrored log tail is disposable. Dropping it frees a full NVS page.
+static void dropOtaLogTailForSpace() {
+  nvs_handle_t nvs_handle;
+  if (nvs_open("ota", NVS_READWRITE, &nvs_handle) != ESP_OK) {
+    return;
+  }
+  nvs_erase_key(nvs_handle, "ota_log_tail");
+  nvs_erase_key(nvs_handle, "log_tail_len");
+  nvs_commit(nvs_handle);
+  nvs_close(nvs_handle);
+}
+
+static bool writeRollbackSubtype(uint8_t subtype) {
+  esp_err_t err = ESP_FAIL;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    nvs_handle_t nvs_handle;
+    err = nvs_open("ota", NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+      Serial.printf("ERROR: NVS open for rollback subtype failed: %s\n", esp_err_to_name(err));
+      return false;
+    }
+
+    err = nvs_set_u8(nvs_handle, "rollback_subtype", subtype);
+    if (err == ESP_ERR_NVS_TYPE_MISMATCH) {
+      nvs_erase_key(nvs_handle, "rollback_subtype");
+      err = nvs_set_u8(nvs_handle, "rollback_subtype", subtype);
+    }
+    if (err == ESP_OK) {
+      err = nvs_set_u8(nvs_handle, "rollback_flag", 0);
+    }
+    if (err == ESP_OK) {
+      err = nvs_commit(nvs_handle);
+    }
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) {
+      return true;
+    }
+    if (attempt == 0 && nvsNeedsSpace(err)) {
+      Serial.printf("WARN: NVS full writing rollback subtype (%s); dropping ota log tail\n",
+                    esp_err_to_name(err));
+      dropOtaLogTailForSpace();
+      continue;
+    }
+    break;
+  }
+  Serial.printf("ERROR: Failed to store rollback subtype: %s\n", esp_err_to_name(err));
+  return false;
+}
+
 // When NVS rollback metadata is missing (esptool flash), seed from the other OTA slot.
 static bool persistRollbackSubtype(uint8_t subtype) {
-  nvs_handle_t nvs_handle;
-  esp_err_t err = nvs_open("ota", NVS_READWRITE, &nvs_handle);
-  if (err != ESP_OK) {
-    return false;
-  }
-  err = nvs_set_u8(nvs_handle, "rollback_subtype", subtype);
-  if (err == ESP_OK) {
-    err = nvs_set_u8(nvs_handle, "rollback_flag", 0);
-  }
-  if (err == ESP_OK) {
-    err = nvs_commit(nvs_handle);
-  }
-  nvs_close(nvs_handle);
-  return err == ESP_OK;
+  return writeRollbackSubtype(subtype);
 }
 
 static bool applyRollbackBootPartition(const esp_partition_t* rollback_partition, String* errorCode) {
@@ -5726,11 +5766,15 @@ static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternate
   }
 
   nvs_handle_t nvs_handle;
+  esp_err_t readErr = ESP_ERR_NVS_NOT_FOUND;
   if (nvs_open("ota", NVS_READONLY, &nvs_handle) == ESP_OK) {
-    if (nvs_get_u8(nvs_handle, "rollback_subtype", &rollback_subtype) == ESP_OK) {
+    readErr = nvs_get_u8(nvs_handle, "rollback_subtype", &rollback_subtype);
+    if (readErr == ESP_OK) {
       rollback_partition = findPartitionBySubtype(rollback_subtype);
     }
     nvs_close(nvs_handle);
+  } else {
+    readErr = ESP_FAIL;
   }
 
   // Saved return slot is the one already running. Do not promote the other image.
@@ -5743,6 +5787,7 @@ static const esp_partition_t* resolveRollbackTargetPartition(bool* usedAlternate
   }
 
   if (rollback_partition == NULL) {
+    Serial.printf("Rollback subtype unavailable: %s\n", esp_err_to_name(readErr));
     const esp_partition_t* alternate = findAlternateOtaSlotPartition();
     if (alternate == NULL) {
       return NULL;
@@ -5883,19 +5928,16 @@ String buildActivePartitionResponse() {
 // Save rollback information to NVS
 void saveRollbackInfo() {
   running_partition = esp_ota_get_running_partition();
-  nvs_handle_t nvs_handle;
-  esp_err_t err = nvs_open("ota", NVS_READWRITE, &nvs_handle);
-  if (err != ESP_OK) {
-    Serial.println("ERROR: Failed to open NVS for rollback info");
+  if (running_partition == NULL) {
+    Serial.println("ERROR: Rollback info not stored: running partition unknown");
     return;
   }
 
-  if (running_partition != NULL) {
-    nvs_set_u8(nvs_handle, "rollback_subtype", running_partition->subtype);
+  const uint8_t subtype = running_partition->subtype;
+  if (!writeRollbackSubtype(subtype)) {
+    Serial.printf("ERROR: Rollback info not stored: subtype=%u\n", (unsigned)subtype);
+    return;
   }
-  nvs_set_u8(nvs_handle, "rollback_flag", 0);
-  nvs_commit(nvs_handle);
-  nvs_close(nvs_handle);
 
   OtaDiagStore diag;
   loadOtaDiag(diag);
@@ -5908,8 +5950,7 @@ void saveRollbackInfo() {
   diag.session_md5_prefix[3] = expected_md5[3];
   saveOtaDiag(diag);
 
-  Serial.printf("Rollback info saved: subtype=%u\n",
-                running_partition != NULL ? (unsigned)running_partition->subtype : 0U);
+  Serial.printf("Rollback info saved: subtype=%u\n", (unsigned)subtype);
 }
 
 // Check for boot failures and rollback if needed

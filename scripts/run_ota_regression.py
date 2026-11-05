@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import time
@@ -180,6 +181,54 @@ def md5_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_COMPILER_MONTHS = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
+_COMPILER_BUILD_RE = re.compile(
+    r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:\s+(\d{1,4}))?"
+)
+_ISO_BUILD_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+
+
+def build_dates_match(expected: str, observed: Optional[str]) -> bool:
+    """True when the device build string is the expected calendar day.
+
+    Current images report YYYY-MM-DD. The SARAH factory image reports the
+    compiler date (`Mar 13 2026 02:37:23`). A short BLE read can cut that to
+    `Mar 13 202`. Both are the same day as 2026-03-13.
+    """
+    if not observed:
+        return False
+    observed = observed.strip()
+    expected = expected.strip()
+    if observed == expected:
+        return True
+    expected_iso = _ISO_BUILD_RE.match(expected)
+    compiler = _COMPILER_BUILD_RE.match(observed)
+    if not expected_iso or not compiler or not compiler.group(3):
+        return False
+    year_s, month_s, day_s = expected_iso.groups()
+    if int(compiler.group(2)) != int(day_s):
+        return False
+    if _COMPILER_MONTHS[compiler.group(1)] != int(month_s):
+        return False
+    observed_year = compiler.group(3)
+    if len(observed_year) < 3:
+        return False
+    return year_s.startswith(observed_year)
 
 
 def parse_version_string(version_payload: str) -> dict[str, str]:
@@ -657,6 +706,7 @@ class OtaRegressionRunner:
         *,
         require_trust: bool = False,
         read_version: bool = True,
+        read_version_when_pending_clear: bool = False,
     ) -> dict[str, Any]:
         address = await self.ensure_address()
         self.ble_tracker.set("connecting", f"diagnostics -> {address}")
@@ -670,21 +720,25 @@ class OtaRegressionRunner:
         snapshot: dict[str, Any] = {}
         try:
             ota_diag_raw = await interface._send_command_and_read_response("GET_OTA_DIAG")
+            ota_diag = parse_ota_diag(ota_diag_raw)
             boot_info_raw = await interface._send_command_and_read_response("GET_BOOT_INFO")
             logs = await interface.get_logs()
             version_raw = None
             version: dict[str, str] = {}
-            if read_version:
+            # Read the version before this session ends. Opening COM4 afterwards
+            # reboots the ESP32-S3 and drops Bluetooth.
+            pending_clear = ota_diag.get("pending") == "0"
+            if read_version or (read_version_when_pending_clear and pending_clear):
                 version_raw, version = await read_firmware_version(interface)
 
             snapshot = {
                 "ota_diag_raw": ota_diag_raw,
-                "ota_diag": parse_ota_diag(ota_diag_raw),
+                "ota_diag": ota_diag,
                 "boot_info_raw": boot_info_raw,
                 "boot_info": parse_boot_info(boot_info_raw),
                 "logs": logs or "",
                 "version_raw": version_raw,
-                "version": version if read_version else {},
+                "version": version,
             }
         finally:
             await interface.disconnect()
@@ -754,7 +808,10 @@ class OtaRegressionRunner:
             poll += 1
             await self.heartbeat.maybe_emit_async()
             await self.wait_for_ble()
-            snapshot = await self.collect_diagnostics(read_version=False)
+            snapshot = await self.collect_diagnostics(
+                read_version=False,
+                read_version_when_pending_clear=True,
+            )
             last_snapshot = snapshot
             pending = snapshot["ota_diag"].get("pending", "1")
             streak = int(snapshot["ota_diag"].get("streak", "0") or 0)
@@ -764,9 +821,6 @@ class OtaRegressionRunner:
                 f"ota_diag={snapshot.get('ota_diag_raw', '-')}"
             )
             if pending == "0":
-                version_snapshot = await self.collect_diagnostics(read_version=True)
-                snapshot["version"] = version_snapshot.get("version", {})
-                snapshot["version_raw"] = version_snapshot.get("version_raw")
                 return snapshot
             if streak < OTA_GOOD_BOOT_STREAK_REQUIRED:
                 self.log(
@@ -791,7 +845,7 @@ class OtaRegressionRunner:
         build = version.get("Build")
         if spec.expected_sw and spec.expected_sw != "unknown" and sw != spec.expected_sw:
             errors.append(f"Expected SW {spec.expected_sw}, observed {sw!r}")
-        if spec.expected_build and build != spec.expected_build:
+        if spec.expected_build and not build_dates_match(spec.expected_build, build):
             errors.append(f"Expected Build {spec.expected_build}, observed {build!r}")
 
     def verify_boot_info(self, boot_info: dict[str, str], errors: list[str]) -> None:

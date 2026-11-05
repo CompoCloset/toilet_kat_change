@@ -1,39 +1,27 @@
-# Flash SARAH bootloader + extracted factory app + canonical partition table.
+# Write the full SARAH merged image so the chip matches a factory board.
+# That includes blank NVS at 0x9000, blank OTA slots, and the image's own otadata.
 param(
     [string]$Port = "COM5",
-    [string]$ArtifactsDir = "",
-    [string]$Label = "sarah"
+    [string]$MergedBin = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-if (-not $ArtifactsDir) {
-    $ArtifactsDir = Join-Path $Root "test-builds\ota-regression"
+if (-not $MergedBin) {
+    $MergedBin = Join-Path $Root "FACTORY_BINARIES\SARAH_toilet_kat_change.ino.merged.bin"
 }
-$ArtifactsDir = (Resolve-Path $ArtifactsDir).Path
-
-$BootBin = Join-Path $ArtifactsDir "${Label}_bootloader.bin"
-$PartBin = Join-Path $ArtifactsDir "${Label}_partitions.bin"
-$AppBin = Join-Path $ArtifactsDir "${Label}_factory_app.bin"
-$OtaData = Join-Path $env:TEMP "flash_sarah_factory_otadata.bin"
-
-foreach ($path in @($BootBin, $PartBin, $AppBin)) {
-    if (-not (Test-Path $path)) {
-        throw "Missing artifact: $path (run build_ota_regression_firmware.py first)"
-    }
+if (-not (Test-Path $MergedBin)) {
+    throw "Missing merged image: $MergedBin"
+}
+$MergedBin = (Resolve-Path $MergedBin).Path
+$size = (Get-Item $MergedBin).Length
+if ($size -ne 0x1000000) {
+    throw "SARAH merged image must be 16MB (16777216 bytes), got $size"
 }
 
-python (Join-Path $PSScriptRoot "make_otadata.py") factory $OtaData
-if ($LASTEXITCODE -ne 0) {
-    throw "make_otadata.py failed"
-}
-
-Write-Host "Flashing SARAH factory on $Port..."
+Write-Host "Flashing full SARAH factory image ($size bytes) on $Port..."
 python -m esptool --chip esp32s3 --port $Port --baud 921600 write-flash `
-    0x0 $BootBin `
-    0x8000 $PartBin `
-    0xE000 $OtaData `
-    0x10000 $AppBin
+    --flash-size 16MB --erase-all 0x0 $MergedBin
 if ($LASTEXITCODE -ne 0) {
     throw "esptool write-flash failed with exit code $LASTEXITCODE"
 }
